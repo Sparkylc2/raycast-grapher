@@ -1,0 +1,76 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "grapher",
+  "title": "Grapher",
+  "description": "Plot 2D and 3D equations, explicit or implicit, from Raycast",
+  "icon": "command-icon.png",
+  "author": "sparkylc2",
+  "categories": [
+    "Productivity",
+    "Developer Tools"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "graph",
+      "title": "Graph",
+      "subtitle": "Grapher",
+      "description": "Enter equations and open them in the interactive viewer",
+      "mode": "view",
+      "arguments": [
+        {
+          "name": "expression",
+          "placeholder": "y = sin(x)",
+          "type": "text",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "preferences": [
+    {
+      "name": "frameRate",
+      "title": "Animation Frame Rate",
+      "description": "Upper limit on frames per second while the plot moves. Lower it if motion stutters.",
+      "type": "dropdown",
+      "required": false,
+      "default": "30",
+      "data": [
+        {
+          "title": "15 fps",
+          "value": "15"
+        },
+        {
+          "title": "30 fps",
+          "value": "30"
+        },
+        {
+          "title": "45 fps",
+          "value": "45"
+        },
+        {
+          "title": "60 fps",
+          "value": "60"
+        }
+      ]
+    }
+  ],
+  "dependencies": {
+    "@grapher/core": "*",
+    "@raycast/api": "^1.80.0",
+    "@raycast/utils": "^1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "dev": "ray develop",
+    "build": "ray build -e dist",
+    "lint": "ray lint",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node ./scripts/link-tsc.mjs",
+    "test": "esbuild src/motion.ts --bundle --platform=node --format=esm --outfile=test/.build/motion.mjs --log-level=warning && node --test test/*.test.mjs"
+  }
+}

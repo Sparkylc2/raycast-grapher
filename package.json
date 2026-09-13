@@ -1,0 +1,22 @@
+{
+  "name": "raycast-grapher",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Interactive 2D/3D grapher driven from Raycast",
+  "workspaces": [
+    "packages/core",
+    "packages/viewer",
+    "packages/extension"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

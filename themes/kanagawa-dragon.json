@@ -1,0 +1,21 @@
+{
+  "author": "Lukas Campbell",
+  "authorUsername": "sparkylc2",
+  "version": "1",
+  "name": "Kanagawa Dragon",
+  "appearance": "dark",
+  "colors": {
+    "background": "#181616",
+    "backgroundSecondary": "#181616",
+    "text": "#c5c9c5",
+    "selection": "#c5c9c5",
+    "loader": "#8ba4b0",
+    "red": "#c4746e",
+    "orange": "#b6927b",
+    "yellow": "#c4b28a",
+    "green": "#8a9a7b",
+    "blue": "#8ba4b0",
+    "purple": "#8992a7",
+    "magenta": "#a292a3"
+  }
+}

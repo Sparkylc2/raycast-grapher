@@ -1,0 +1,13 @@
+{
+  "name": "@grapher/viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --format=esm --outfile=public/main.js",
+    "dev": "esbuild src/main.ts --bundle --format=esm --outfile=public/main.js --watch --servedir=public",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": { "@grapher/core": "*" },
+  "devDependencies": { "esbuild": "^0.25.0" }
+}

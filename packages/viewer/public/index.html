@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Grapher</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  /* Seeded with Kanagawa Dragon; main.ts overwrites these from the shared
+     theme so the page chrome and the plot never disagree. */
+  :root {
+    color-scheme: dark light;
+    --ground: #181616;
+    --panel: #0d0c0c;
+    --ink: #a6a69c;
+    --error: #e46876;
+    --border: #54546D;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--ground); }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  #hud {
+    position: fixed; top: 12px; left: 12px; padding: 8px 12px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--ink); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; pointer-events: none; white-space: pre;
+  }
+  #err { color: var(--error); }
+</style>
+<canvas id="stage"></canvas>
+<div id="hud"></div>
+<script type="module" src="./main.js"></script>
