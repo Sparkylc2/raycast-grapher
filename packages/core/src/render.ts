@@ -2,6 +2,8 @@ import { type Camera2D, bounds2D } from "./camera.js";
 import type { Graph } from "./classify.js";
 import { compileJs } from "./compile-js.js";
 import { GLYPH_HEIGHT, drawText, textHeight, textWidth } from "./font.js";
+import type { Intersection } from "./intersect.js";
+import type { Plot2D, Range } from "./plot.js";
 import type { RasterSize } from "./raster.js";
 import { type GraphTheme, type RGB, DEFAULT_THEME, hexToRgb } from "./theme.js";
 import type { Typeface } from "./typeface.js";
@@ -32,16 +34,35 @@ export interface RenderOptions {
   readonly pixelRatio?: number;
   /** Height of tick label figures in display pixels. */
   readonly labelSize?: number;
-  /** Outline font for tick labels. Without one, labels fall back to the bitmap font. */
+  /** Outline font for labels. Without one, figures fall back to the bitmap font and names are omitted. */
   readonly typeface?: Typeface;
+  /** Names drawn at the positive ends of the horizontal and vertical axes. */
+  readonly axisNames?: readonly [string, string] | null;
+  /** Crossings to mark on the plot. */
+  readonly intersections?: readonly Intersection[];
+  /** Index into `intersections` to highlight with its coordinates. */
+  readonly highlight?: number | null;
+  /** Playback time: trajectories are drawn up to here. Null shows them whole. */
+  readonly playhead?: number | null;
 }
 
 /** Theme colours resolved to channels, so the pixel loops never parse hex. */
-interface Palette {
+export interface Palette {
   readonly background: RGB;
   readonly grid: RGB;
   readonly axis: RGB;
   readonly text: RGB;
+  readonly series: readonly RGB[];
+}
+
+export function paletteOf(theme: GraphTheme): Palette {
+  return {
+    background: hexToRgb(theme.background),
+    grid: hexToRgb(theme.grid),
+    axis: hexToRgb(theme.axis),
+    text: hexToRgb(theme.text),
+    series: theme.series.map(hexToRgb),
+  };
 }
 
 interface Bounds {
@@ -69,7 +90,14 @@ export function formatTick(value: number, step: number): string {
     : text;
 }
 
-class Canvas {
+/** Four significant figures, the precision a coordinate readout needs. */
+export function formatCoordinate(value: number): string {
+  if (Math.abs(value) < 1e-10) return "0";
+  if (Math.abs(value) >= 1e6 || Math.abs(value) < 1e-4) return value.toExponential(3).replace("+", "");
+  return String(Number(value.toPrecision(4)));
+}
+
+export class Canvas {
   readonly data: Uint8ClampedArray;
 
   constructor(
@@ -122,6 +150,148 @@ class Canvas {
       if (cover > 0) for (let x = 0; x < this.width; x++) this.blend(x, y, color, cover * alpha);
     }
   }
+
+  /** Antialiased rounded rectangle, from its signed distance. */
+  roundedRect(x: number, y: number, w: number, h: number, radius: number, color: RGB, alpha = 1): void {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const hx = w / 2 - radius;
+    const hy = h / 2 - radius;
+    for (let py = Math.floor(y) - 1; py <= Math.ceil(y + h) + 1; py++) {
+      for (let px = Math.floor(x) - 1; px <= Math.ceil(x + w) + 1; px++) {
+        const qx = Math.abs(px + 0.5 - cx) - hx;
+        const qy = Math.abs(py + 0.5 - cy) - hy;
+        const d = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - radius;
+        const cover = Math.max(0, Math.min(1, 0.5 - d));
+        if (cover > 0) this.blend(px, py, color, cover * alpha);
+      }
+    }
+  }
+
+  /** Antialiased filled circle. */
+  disc(cx: number, cy: number, radius: number, color: RGB, alpha = 1): void {
+    const x0 = Math.floor(cx - radius - 1);
+    const x1 = Math.ceil(cx + radius + 1);
+    const y0 = Math.floor(cy - radius - 1);
+    const y1 = Math.ceil(cy + radius + 1);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+        const cover = Math.max(0, Math.min(1, radius + 0.5 - d));
+        if (cover > 0) this.blend(x, y, color, cover * alpha);
+      }
+    }
+  }
+}
+
+/**
+ * Per-plot coverage, composited once. Strokes take the maximum rather than
+ * blending, so a polyline's joints and overlapping samples never double up.
+ */
+class Coverage {
+  readonly values: Float32Array;
+  private minX = Infinity;
+  private minY = Infinity;
+  private maxX = -Infinity;
+  private maxY = -Infinity;
+
+  constructor(
+    readonly width: number,
+    readonly height: number,
+  ) {
+    this.values = new Float32Array(width * height);
+  }
+
+  mark(x: number, y: number, alpha: number): void {
+    const i = y * this.width + x;
+    if (alpha <= this.values[i]!) return;
+    this.values[i] = alpha;
+    if (x < this.minX) this.minX = x;
+    if (x > this.maxX) this.maxX = x;
+    if (y < this.minY) this.minY = y;
+    if (y > this.maxY) this.maxY = y;
+  }
+
+  /** Antialiased segment, clipped to the canvas first so long lines stay cheap. */
+  segment(x0: number, y0: number, x1: number, y1: number, halfWidth: number): void {
+    const pad = halfWidth + 1.5;
+    const clipped = clipSegment(x0, y0, x1, y1, -pad, -pad, this.width + pad, this.height + pad);
+    if (!clipped) return;
+    [x0, y0, x1, y1] = clipped;
+    const left = Math.max(0, Math.floor(Math.min(x0, x1) - pad));
+    const right = Math.min(this.width - 1, Math.ceil(Math.max(x0, x1) + pad));
+    const top = Math.max(0, Math.floor(Math.min(y0, y1) - pad));
+    const bottom = Math.min(this.height - 1, Math.ceil(Math.max(y0, y1) + pad));
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const lengthSq = dx * dx + dy * dy;
+    for (let py = top; py <= bottom; py++) {
+      const cy = py + 0.5;
+      for (let px = left; px <= right; px++) {
+        const cx = px + 0.5;
+        let t = lengthSq > 0 ? ((cx - x0) * dx + (cy - y0) * dy) / lengthSq : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const ex = x0 + t * dx - cx;
+        const ey = y0 + t * dy - cy;
+        const alpha = 1 - smoothstep(halfWidth - 1, halfWidth + 1, Math.sqrt(ex * ex + ey * ey));
+        if (alpha > 0) this.mark(px, py, alpha);
+      }
+    }
+  }
+
+  flush(canvas: Canvas, color: RGB, alpha = 1): void {
+    if (this.minX > this.maxX) return;
+    for (let y = this.minY; y <= this.maxY; y++) {
+      for (let x = this.minX; x <= this.maxX; x++) {
+        const i = y * this.width + x;
+        const value = this.values[i]!;
+        if (value > 0) {
+          canvas.blend(x, y, color, value * alpha);
+          this.values[i] = 0;
+        }
+      }
+    }
+    this.minX = this.minY = Infinity;
+    this.maxX = this.maxY = -Infinity;
+  }
+}
+
+/** Liang-Barsky: the part of a segment inside a rectangle, or null. */
+function clipSegment(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+): [number, number, number, number] | null {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const edges: [number, number][] = [
+    [-dx, x0 - left],
+    [dx, right - x0],
+    [-dy, y0 - top],
+    [dy, bottom - y0],
+  ];
+  for (const [p, q] of edges) {
+    if (p === 0) {
+      if (q < 0) return null;
+      continue;
+    }
+    const r = q / p;
+    if (p < 0) {
+      if (r > t1) return null;
+      if (r > t0) t0 = r;
+    } else {
+      if (r < t0) return null;
+      if (r < t1) t1 = r;
+    }
+  }
+  return [x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy];
 }
 
 /*
@@ -153,6 +323,23 @@ function curveOf(graph: Graph & { type: "explicit2d" }): (x: number) => number {
   return curve;
 }
 
+/** Converts single-graph layers, the original render input, into plots. */
+function layerToPlot(layer: RenderLayer): Plot2D {
+  const { graph, color } = layer;
+  if (graph.type === "explicit2d") {
+    return { kind: "explicit", color, f: curveOf(graph), domain: null, clip: null };
+  }
+  return {
+    kind: "field",
+    color,
+    F: fieldOf(graph),
+    region: graph.type === "inequality2d" ? { strict: graph.strict } : null,
+    clipH: null,
+    clipV: null,
+  };
+}
+
+/** Renders single-graph layers. Kept for the original callers; new code uses `renderPlots`. */
 export function renderScene(
   layers: readonly RenderLayer[],
   camera: Camera2D,
@@ -160,56 +347,110 @@ export function renderScene(
   theme: GraphTheme = DEFAULT_THEME,
   options: RenderOptions = {},
 ): Uint8ClampedArray {
+  return renderPlots(layers.map(layerToPlot), camera, size, theme, options);
+}
+
+export function renderPlots(
+  plots: readonly Plot2D[],
+  camera: Camera2D,
+  size: RasterSize,
+  theme: GraphTheme = DEFAULT_THEME,
+  options: RenderOptions = {},
+): Uint8ClampedArray {
   const { width, height } = size;
   const ratio = options.pixelRatio ?? 1;
-  const palette: Palette = {
-    background: hexToRgb(theme.background),
-    grid: hexToRgb(theme.grid),
-    axis: hexToRgb(theme.axis),
-    text: hexToRgb(theme.text),
-  };
+  const palette = paletteOf(theme);
   const canvas = new Canvas(width, height, options.transparent ? null : palette.background);
   const b = bounds2D(camera, width / height);
-
   const toPxX = (x: number): number => ((x - b.minX) / (b.maxX - b.minX)) * width;
   const toPxY = (y: number): number => ((b.maxY - y) / (b.maxY - b.minY)) * height;
 
-  const step = niceStep(b.maxY - b.minY, height / ratio, 45);
+  // Heatmaps sit under the grid so gridlines stay readable across them.
+  for (const plot of plots) if (plot.kind === "heatmap") drawHeatmap(canvas, plot, b, palette);
 
+  const step = niceStep(b.maxY - b.minY, height / ratio, 45);
   for (let g = Math.ceil(b.minX / step) * step; g <= b.maxX; g += step) {
     canvas.vline(toPxX(g), palette.grid, 0.5 * ratio, isMajor(g, step) ? 0.55 : 0.3);
   }
   for (let g = Math.ceil(b.minY / step) * step; g <= b.maxY; g += step) {
     canvas.hline(toPxY(g), palette.grid, 0.5 * ratio, isMajor(g, step) ? 0.55 : 0.3);
   }
-
   if (b.minX <= 0 && b.maxX >= 0) canvas.vline(toPxX(0), palette.axis, 0.6 * ratio, 0.9);
   if (b.minY <= 0 && b.maxY >= 0) canvas.hline(toPxY(0), palette.axis, 0.6 * ratio, 0.9);
 
   const halfWidth = 1.2 * ratio;
-  for (const layer of layers) {
-    const color = hexToRgb(layer.color);
-    if (layer.graph.type === "explicit2d") {
-      drawCurve(canvas, curveOf(layer.graph), color, b, halfWidth);
-    } else {
-      drawField(canvas, layer.graph, color, b, halfWidth);
+  const coverage = new Coverage(width, height);
+  const playhead = options.playhead ?? null;
+
+  // Regions first, then direction fields, then curves on top of both.
+  for (const plot of plots) {
+    if (plot.kind === "field") drawField(canvas, plot, hexToRgb(plot.color), b, halfWidth);
+  }
+  for (const plot of plots) {
+    if (plot.kind === "slopes") drawSlopes(canvas, coverage, plot, b, step, ratio, toPxX, toPxY);
+  }
+  for (const plot of plots) {
+    const color = hexToRgb(plot.color);
+    switch (plot.kind) {
+      case "explicit":
+        drawCurve(canvas, plot, color, b, halfWidth);
+        break;
+      case "parametric":
+        drawParametric(canvas, coverage, plot, color, toPxX, toPxY, halfWidth);
+        break;
+      case "trajectory":
+        drawTrajectory(canvas, coverage, plot, color, toPxX, toPxY, halfWidth, ratio, playhead, palette);
+        break;
+      case "point":
+        canvas.disc(toPxX(plot.x), toPxY(plot.y), 5 * ratio, palette.background, 0.9);
+        canvas.disc(toPxX(plot.x), toPxY(plot.y), 4 * ratio, color);
+        break;
+      default:
+        break;
     }
   }
 
-  // Labels go last so curves never run through them.
-  const figureHeight = (options.labelSize ?? 12) * ratio;
-  const ink = options.typeface
-    ? outlineInk(canvas, options.typeface, figureHeight, ratio, palette)
-    : bitmapInk(canvas, figureHeight, ratio, palette);
-  drawTicks(canvas, b, step, ratio, ink, toPxX, toPxY);
+  const intersections = options.intersections ?? [];
+  const highlight = options.highlight ?? null;
+  intersections.forEach((point, i) => {
+    if (i === highlight) return;
+    const px = toPxX(point.x);
+    const py = toPxY(point.y);
+    canvas.disc(px, py, 4 * ratio, palette.text, 0.9);
+    canvas.disc(px, py, 2.4 * ratio, palette.background, 0.95);
+  });
+
+  const ink = makeInk(canvas, options.typeface, (options.labelSize ?? 12) * ratio, ratio, palette);
+  const widestYLabel = drawTicks(canvas, b, step, ratio, ink, toPxX, toPxY);
+  if (options.axisNames && options.typeface) {
+    drawAxisNames(canvas, options.axisNames, ratio, ink, toPxX, toPxY, widestYLabel);
+  }
+
+  const chosen = highlight !== null ? intersections[highlight] : undefined;
+  if (chosen) {
+    const px = toPxX(chosen.x);
+    const py = toPxY(chosen.y);
+    canvas.disc(px, py, 6.5 * ratio, palette.background, 0.9);
+    canvas.disc(px, py, 5 * ratio, palette.text);
+    const label = `(${formatCoordinate(chosen.x)}, ${formatCoordinate(chosen.y)})`;
+    const gap = 9 * ratio;
+    const labelWidth = ink.width(label);
+    const x = px + gap + labelWidth < width - 4 * ratio ? px + gap : px - gap - labelWidth;
+    const top = Math.min(Math.max(py - gap - ink.height, 4 * ratio), height - ink.height - 4 * ratio);
+    // A solid backing: the glyph knockout alone let tick labels show through the digits.
+    const padX = 5 * ratio;
+    const padY = 4 * ratio;
+    canvas.roundedRect(x - padX, top - padY, labelWidth + 2 * padX, ink.height + 2 * padY, 4 * ratio, palette.background, 0.9);
+    ink.stamp(label, x, top);
+  }
   return canvas.data;
 }
 
 const isMajor = (g: number, step: number): boolean =>
   Math.abs(g / (step * 5) - Math.round(g / (step * 5))) < 1e-6;
 
-/** How tick labels get onto the canvas, independent of which font draws them. */
-interface LabelInk {
+/** How labels get onto the canvas, independent of which font draws them. */
+export interface LabelInk {
   /** Visual height of figures, used to centre and space labels. */
   readonly height: number;
   width(text: string): number;
@@ -217,32 +458,31 @@ interface LabelInk {
   stamp(text: string, x: number, top: number): void;
 }
 
-function outlineInk(
+export function makeInk(
   canvas: Canvas,
-  typeface: Typeface,
+  typeface: Typeface | undefined,
   figureHeight: number,
   ratio: number,
   palette: Palette,
 ): LabelInk {
-  // Size the font so its cap height, which figures share, lands on the requested height.
-  const size = figureHeight / typeface.capHeight(1);
-  const cap = typeface.capHeight(size);
-  const halo = Math.max(1, Math.round(1.5 * ratio));
-  return {
-    height: cap,
-    width: (text) => typeface.measure(typeface.shape(text), size),
-    stamp: (text, x, top) => {
-      const shaped = typeface.shape(text);
-      const baseline = top + cap;
-      // On a transparent frame the knockout matches the Raycast background
-      // behind it, so a curve or gridline passing under the figures reads as a gap.
-      typeface.draw(shaped, x, baseline, size, (px, py, c) => canvas.blend(px, py, palette.background, 0.9 * c), halo);
-      typeface.draw(shaped, x, baseline, size, (px, py, c) => canvas.blend(px, py, palette.text, c));
-    },
-  };
-}
-
-function bitmapInk(canvas: Canvas, figureHeight: number, ratio: number, palette: Palette): LabelInk {
+  if (typeface) {
+    // Size the font so its cap height, which figures share, lands on the requested height.
+    const size = figureHeight / typeface.capHeight(1);
+    const cap = typeface.capHeight(size);
+    const halo = Math.max(1, Math.round(1.5 * ratio));
+    return {
+      height: cap,
+      width: (text) => typeface.measure(typeface.shape(text), size),
+      stamp: (text, x, top) => {
+        const shaped = typeface.shape(text);
+        const baseline = top + cap;
+        // On a transparent frame the knockout matches the Raycast background
+        // behind it, so a curve or gridline passing under the figures reads as a gap.
+        typeface.draw(shaped, x, baseline, size, (px, py, c) => canvas.blend(px, py, palette.background, 0.9 * c), halo);
+        typeface.draw(shaped, x, baseline, size, (px, py, c) => canvas.blend(px, py, palette.text, c));
+      },
+    };
+  }
   // Bitmap glyphs scale by whole pixels, so round to the nearest multiple of the cell.
   const scale = Math.max(1, Math.round(figureHeight / GLYPH_HEIGHT));
   const halo = Math.max(1, Math.round(ratio));
@@ -276,7 +516,7 @@ function drawTicks(
   ink: LabelInk,
   toPxX: (x: number) => number,
   toPxY: (y: number) => number,
-): void {
+): number {
   const pad = 4 * ratio;
   const gap = 10 * ratio;
   const pxPerUnitX = canvas.width / (b.maxX - b.minX);
@@ -295,37 +535,65 @@ function drawTicks(
   }
 
   const yStep = labelStepFor(step, pxPerUnitY, ink.height + gap);
+  let widestY = 0;
   for (let g = Math.ceil(b.minY / yStep) * yStep; g <= b.maxY; g += yStep) {
     if (Math.abs(g) < yStep * 1e-6) continue;
     const label = formatTick(g, yStep);
+    widestY = Math.max(widestY, ink.width(label));
     // Keep y labels on canvas when the axis sits at the right edge.
     const x = Math.min(baseX, canvas.width - ink.width(label) - pad);
     ink.stamp(label, x, toPxY(g) - ink.height / 2);
   }
+  return widestY;
 }
+
+/** Axis names at the positive ends, so a {q, p} plot says which is which. */
+function drawAxisNames(
+  canvas: Canvas,
+  names: readonly [string, string],
+  ratio: number,
+  ink: LabelInk,
+  toPxX: (x: number) => number,
+  toPxY: (y: number) => number,
+  widestYLabel: number,
+): void {
+  const pad = 6 * ratio;
+  const axisY = Math.min(Math.max(toPxY(0), pad + ink.height), canvas.height - pad);
+  ink.stamp(names[0], canvas.width - ink.width(names[0]) - pad, axisY - ink.height - pad);
+
+  // The vertical name goes beside the tick labels, which sit just right of the
+  // axis; drawn over them it read as "4t". Left of the axis when there's no room.
+  const tickPad = 4 * ratio;
+  const labelsLeft = Math.min(Math.max(toPxX(0) + tickPad, tickPad), canvas.width - tickPad);
+  const width = ink.width(names[1]);
+  let x = labelsLeft + widestYLabel + pad;
+  if (x + width > canvas.width - pad) x = Math.min(toPxX(0), canvas.width) - pad - width;
+  ink.stamp(names[1], Math.max(pad, x), pad);
+}
+
+const inRange = (value: number, range: Range | null): boolean =>
+  range === null || (value >= range.lo && value <= range.hi);
 
 /**
  * Fast path for y = f(x). The field y - f(x) has the same value and gradient
  * as the general path computes, but f only needs evaluating once per column,
  * and only the rows within reach of the curve need touching.
  */
-function drawCurve(
-  canvas: Canvas,
-  f: (x: number) => number,
-  color: RGB,
-  b: Bounds,
-  halfWidth: number,
-): void {
+function drawCurve(canvas: Canvas, plot: Plot2D & { kind: "explicit" }, color: RGB, b: Bounds, halfWidth: number): void {
   const { width, height } = canvas;
+  const { f, domain, clip } = plot;
   const fx = new Float64Array(width);
+  const xs = new Float64Array(width);
   for (let col = 0; col < width; col++) {
-    fx[col] = f(b.minX + ((col + 0.5) / width) * (b.maxX - b.minX));
+    xs[col] = b.minX + ((col + 0.5) / width) * (b.maxX - b.minX);
+    fx[col] = f(xs[col]!);
   }
 
   const unitsPerRow = (b.maxY - b.minY) / height;
   const reach = halfWidth + 1;
 
   for (let col = 0; col < width; col++) {
+    if (!inRange(xs[col]!, domain)) continue;
     const v0 = fx[col]!;
     if (!Number.isFinite(v0)) continue;
 
@@ -343,30 +611,30 @@ function drawCurve(
 
     for (let row = rowLo; row <= rowHi; row++) {
       const y = b.maxY - (row + 0.5) * unitsPerRow;
+      if (!inRange(y, clip)) continue;
       const alpha = 1 - smoothstep(halfWidth - 1, halfWidth + 1, Math.abs(y - v0) / grad);
       canvas.blend(col, row, color, alpha);
     }
   }
 }
 
-function drawField(canvas: Canvas, graph: Graph, color: RGB, b: Bounds, halfWidth: number): void {
+function drawField(canvas: Canvas, plot: Plot2D & { kind: "field" }, color: RGB, b: Bounds, halfWidth: number): void {
   const { width, height } = canvas;
-  const field = fieldOf(graph);
+  const { F, region, clipH, clipV } = plot;
   const values = new Float64Array(width * height);
+  const xs = Float64Array.from({ length: width }, (_, col) => b.minX + ((col + 0.5) / width) * (b.maxX - b.minX));
 
   for (let row = 0; row < height; row++) {
     const y = b.maxY - ((row + 0.5) / height) * (b.maxY - b.minY);
-    for (let col = 0; col < width; col++) {
-      const x = b.minX + ((col + 0.5) / width) * (b.maxX - b.minX);
-      values[row * width + col] = field(x, y);
-    }
+    for (let col = 0; col < width; col++) values[row * width + col] = F(xs[col]!, y);
   }
 
-  const region = graph.type === "inequality2d";
-  const strict = graph.type === "inequality2d" && graph.strict;
-
+  const strict = region?.strict ?? false;
   for (let row = 0; row < height; row++) {
+    const y = b.maxY - ((row + 0.5) / height) * (b.maxY - b.minY);
+    if (!inRange(y, clipV)) continue;
     for (let col = 0; col < width; col++) {
+      if (!inRange(xs[col]!, clipH)) continue;
       const i = row * width + col;
       const v = values[i]!;
       if (!Number.isFinite(v)) continue;
@@ -392,6 +660,206 @@ function drawField(canvas: Canvas, graph: Graph, color: RGB, b: Bounds, halfWidt
         const alpha = 1 - smoothstep(halfWidth - 1, halfWidth + 1, Math.abs(signed));
         canvas.blend(col, row, color, alpha);
       }
+    }
+  }
+}
+
+/** Short strokes on a world-anchored grid, so the field doesn't swim while panning. */
+function drawSlopes(
+  canvas: Canvas,
+  coverage: Coverage,
+  plot: Plot2D & { kind: "slopes" },
+  b: Bounds,
+  gridStep: number,
+  ratio: number,
+  toPxX: (x: number) => number,
+  toPxY: (y: number) => number,
+): void {
+  const spacing = niceStep(b.maxY - b.minY, canvas.height / ratio, 26);
+  void gridStep;
+  const unitX = canvas.width / (b.maxX - b.minX);
+  const unitY = canvas.height / (b.maxY - b.minY);
+  const half = 6.5 * ratio;
+  const slopes: number[] = [];
+  for (let gy = Math.ceil(b.minY / spacing) * spacing; gy <= b.maxY; gy += spacing) {
+    if (!inRange(gy, plot.clipV)) continue;
+    for (let gx = Math.ceil(b.minX / spacing) * spacing; gx <= b.maxX; gx += spacing) {
+      if (!inRange(gx, plot.clipH)) continue;
+      plot.slopes(gx, gy, slopes);
+      const px = toPxX(gx);
+      const py = toPxY(gy);
+      for (const m of slopes) {
+        // Direction in pixels: one unit right is unitX px, m units up is -m·unitY px.
+        const dx = unitX;
+        const dy = -m * unitY;
+        const length = Math.hypot(dx, dy);
+        if (!(length > 0)) continue;
+        const ux = (dx / length) * half;
+        const uy = (dy / length) * half;
+        coverage.segment(px - ux, py - uy, px + ux, py + uy, 0.75 * ratio);
+      }
+    }
+  }
+  coverage.flush(canvas, hexToRgb(plot.color), 0.45);
+}
+
+/**
+ * Parametric curves sampled adaptively in pixel space: intervals subdivide
+ * until neighbouring samples are within two pixels, and a gap that will not
+ * close is treated as a discontinuity rather than drawn across.
+ */
+function drawParametric(
+  canvas: Canvas,
+  coverage: Coverage,
+  plot: Plot2D & { kind: "parametric" },
+  color: RGB,
+  toPxX: (x: number) => number,
+  toPxY: (y: number) => number,
+  halfWidth: number,
+): void {
+  const { width, height } = canvas;
+  const { range } = plot;
+  let budget = 40000;
+  const at = (t: number): [number, number] => {
+    budget--;
+    return [toPxX(plot.x(t)), toPxY(plot.y(t))];
+  };
+  const finite = (p: [number, number]): boolean => Number.isFinite(p[0]) && Number.isFinite(p[1]);
+  const offscreenTogether = (a: [number, number], c: [number, number]): boolean =>
+    (a[0] < -width && c[0] < -width) ||
+    (a[0] > 2 * width && c[0] > 2 * width) ||
+    (a[1] < -height && c[1] < -height) ||
+    (a[1] > 2 * height && c[1] > 2 * height);
+
+  const walk = (ta: number, pa: [number, number], tb: number, pb: [number, number], depth: number): void => {
+    const fa = finite(pa);
+    const fb = finite(pb);
+    if (!fa && !fb) return;
+    if (fa && fb) {
+      const distance = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+      if (distance <= 2 || budget <= 0 || offscreenTogether(pa, pb)) {
+        coverage.segment(pa[0], pa[1], pb[0], pb[1], halfWidth);
+        return;
+      }
+      if (depth >= 10) {
+        // Still far apart after ten halvings: a jump, not a steep stretch.
+        if (distance < 24) coverage.segment(pa[0], pa[1], pb[0], pb[1], halfWidth);
+        return;
+      }
+    } else if (depth >= 10 || budget <= 0) {
+      return;
+    }
+    const tm = 0.5 * (ta + tb);
+    const pm = at(tm);
+    walk(ta, pa, tm, pm, depth + 1);
+    walk(tm, pm, tb, pb, depth + 1);
+  };
+
+  const samples = 384;
+  let t0 = range.lo;
+  let p0 = at(t0);
+  for (let i = 1; i <= samples; i++) {
+    const t1 = range.lo + ((range.hi - range.lo) * i) / samples;
+    const p1 = at(t1);
+    walk(t0, p0, t1, p1, 0);
+    t0 = t1;
+    p0 = p1;
+  }
+  coverage.flush(canvas, color);
+}
+
+function drawTrajectory(
+  canvas: Canvas,
+  coverage: Coverage,
+  plot: Plot2D & { kind: "trajectory" },
+  color: RGB,
+  toPxX: (x: number) => number,
+  toPxY: (y: number) => number,
+  halfWidth: number,
+  ratio: number,
+  playhead: number | null,
+  palette: Palette,
+): void {
+  const { h, v } = plot;
+  const n = h.length;
+  if (n === 0) return;
+  // Samples are in ascending time, so the playhead splits them with a binary search.
+  let last = n - 1;
+  if (playhead !== null) {
+    let lo = 0;
+    let hi = n - 1;
+    if (playhead < h[0]!) return;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (h[mid]! <= playhead) lo = mid;
+      else hi = mid - 1;
+    }
+    last = lo;
+  }
+  for (let i = 1; i <= last; i++) {
+    coverage.segment(toPxX(h[i - 1]!), toPxY(v[i - 1]!), toPxX(h[i]!), toPxY(v[i]!), halfWidth);
+  }
+  coverage.flush(canvas, color);
+
+  // The starting value, always marked, so it is clear where the solution was pinned.
+  if (playhead === null || plot.t0 <= playhead) {
+    canvas.disc(toPxX(plot.t0), toPxY(plot.v0), 3.6 * ratio, color);
+    canvas.disc(toPxX(plot.t0), toPxY(plot.v0), 2 * ratio, palette.background);
+  }
+  if (playhead !== null && last < n - 1) {
+    const w = (playhead - h[last]!) / (h[last + 1]! - h[last]!);
+    const hx = h[last]! + (h[last + 1]! - h[last]!) * w;
+    const vy = v[last]! + (v[last + 1]! - v[last]!) * w;
+    if (Number.isFinite(vy)) {
+      canvas.disc(toPxX(hx), toPxY(vy), 5.5 * ratio, palette.background, 0.9);
+      canvas.disc(toPxX(hx), toPxY(vy), 4.2 * ratio, color);
+    }
+  }
+}
+
+/**
+ * Values coloured from the ground toward the plot's colour, or diverging
+ * through the ground between blue and red when they straddle zero.
+ */
+function drawHeatmap(canvas: Canvas, plot: Plot2D & { kind: "heatmap" }, b: Bounds, palette: Palette): void {
+  const { width, height } = canvas;
+  const { cols, rows, values, h, v, min, max } = plot;
+  const base = palette.background;
+  const own = hexToRgb(plot.color);
+  const negative = palette.series[0] ?? own;
+  const positive = palette.series[1] ?? own;
+  const diverging = min < 0 && max > 0;
+  const extent = diverging ? Math.max(-min, max) : max - min || 1;
+  const mix = (target: RGB, t: number): RGB => [
+    base[0] + (target[0] - base[0]) * t,
+    base[1] + (target[1] - base[1]) * t,
+    base[2] + (target[2] - base[2]) * t,
+  ];
+
+  for (let row = 0; row < height; row++) {
+    const y = b.maxY - ((row + 0.5) / height) * (b.maxY - b.minY);
+    if (y < v.lo || y > v.hi) continue;
+    const fy = ((y - v.lo) / (v.hi - v.lo)) * (rows - 1);
+    const r0 = Math.min(rows - 2, Math.floor(fy));
+    const wy = fy - r0;
+    for (let col = 0; col < width; col++) {
+      const x = b.minX + ((col + 0.5) / width) * (b.maxX - b.minX);
+      if (x < h.lo || x > h.hi) continue;
+      const fx = ((x - h.lo) / (h.hi - h.lo)) * (cols - 1);
+      const c0 = Math.min(cols - 2, Math.floor(fx));
+      const wx = fx - c0;
+      const value =
+        (values[r0 * cols + c0]! * (1 - wx) + values[r0 * cols + c0 + 1]! * wx) * (1 - wy) +
+        (values[(r0 + 1) * cols + c0]! * (1 - wx) + values[(r0 + 1) * cols + c0 + 1]! * wx) * wy;
+      if (!Number.isFinite(value)) continue;
+      let color: RGB;
+      if (diverging) {
+        const t = Math.min(1, Math.abs(value) / extent);
+        color = mix(value < 0 ? negative : positive, Math.pow(t, 0.8));
+      } else {
+        color = mix(own, Math.pow(Math.min(1, Math.max(0, (value - min) / extent)), 0.8));
+      }
+      canvas.blend(col, row, color, 1);
     }
   }
 }

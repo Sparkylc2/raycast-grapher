@@ -80,6 +80,10 @@ export function toGlslSource(expr: Expr, options: GlslOptions = {}): string {
         }
         return fill(fn.glsl, args);
       }
+      case "apply":
+      case "deriv":
+      case "tuple":
+        throw new Error("Resolve functions, derivatives and tuples before compiling to GLSL");
     }
   };
 

@@ -67,13 +67,16 @@ var binary = (op, left, right) => ({
 });
 function freeVars(expr, constants) {
   const out = /* @__PURE__ */ new Set();
+  const add = (name) => {
+    if (!constants.has(name))
+      out.add(name);
+  };
   const walk = (n) => {
     switch (n.kind) {
       case "num":
         return;
       case "var":
-        if (!constants.has(n.name))
-          out.add(n.name);
+        add(n.name);
         return;
       case "unary":
         walk(n.arg);
@@ -86,47 +89,98 @@ function freeVars(expr, constants) {
         for (const a of n.args)
           walk(a);
         return;
+      case "apply":
+        add(n.name);
+        for (const a of n.args)
+          walk(a);
+        return;
+      case "deriv":
+        walk(n.expr);
+        if (n.variable)
+          add(n.variable);
+        return;
+      case "tuple":
+        for (const item of n.items)
+          walk(item);
+        return;
     }
   };
   walk(expr);
   return out;
 }
+function someNode(expr, test) {
+  if (test(expr))
+    return true;
+  switch (expr.kind) {
+    case "num":
+    case "var":
+      return false;
+    case "unary":
+      return someNode(expr.arg, test);
+    case "binary":
+      return someNode(expr.left, test) || someNode(expr.right, test);
+    case "call":
+    case "apply":
+      return expr.args.some((a) => someNode(a, test));
+    case "deriv":
+      return someNode(expr.expr, test);
+    case "tuple":
+      return expr.items.some((i) => someNode(i, test));
+  }
+}
 
 // ../core/dist/builtins.js
 var CONSTANTS = {
   pi: Math.PI,
+  "\u03C0": Math.PI,
   tau: Math.PI * 2,
+  "\u03C4": Math.PI * 2,
   e: Math.E,
   phi: (1 + Math.sqrt(5)) / 2,
   inf: Infinity
 };
 var CONSTANT_NAMES = new Set(Object.keys(CONSTANTS));
+function realPow(a, b) {
+  if (a >= 0 || Number.isInteger(b))
+    return Math.pow(a, b);
+  const inv = 1 / b;
+  const r = Math.round(inv);
+  if (Math.abs(inv - r) < 1e-9 && Math.abs(r % 2) === 1)
+    return -Math.pow(-a, b);
+  return NaN;
+}
+var floorMod = (a, b) => a - b * Math.floor(a / b);
 var FUNCTIONS = {
-  sin: { arity: 1, js: "Math.sin($0)", glsl: "sin($0)" },
-  cos: { arity: 1, js: "Math.cos($0)", glsl: "cos($0)" },
-  tan: { arity: 1, js: "Math.tan($0)", glsl: "tan($0)" },
-  asin: { arity: 1, js: "Math.asin($0)", glsl: "asin($0)" },
-  acos: { arity: 1, js: "Math.acos($0)", glsl: "acos($0)" },
-  atan: { arity: 1, js: "Math.atan($0)", glsl: "atan($0)" },
-  atan2: { arity: 2, js: "Math.atan2($0, $1)", glsl: "atan($0, $1)" },
-  sinh: { arity: 1, js: "Math.sinh($0)", glsl: "sinh($0)" },
-  cosh: { arity: 1, js: "Math.cosh($0)", glsl: "cosh($0)" },
-  tanh: { arity: 1, js: "Math.tanh($0)", glsl: "tanh($0)" },
-  exp: { arity: 1, js: "Math.exp($0)", glsl: "exp($0)" },
-  ln: { arity: 1, js: "Math.log($0)", glsl: "log($0)" },
-  log: { arity: [1, 2], js: "__log($0, $1)", glsl: "gr_log($0, $1)" },
-  sqrt: { arity: 1, js: "Math.sqrt($0)", glsl: "sqrt($0)" },
-  cbrt: { arity: 1, js: "Math.cbrt($0)", glsl: "gr_cbrt($0)" },
-  abs: { arity: 1, js: "Math.abs($0)", glsl: "abs($0)" },
-  sign: { arity: 1, js: "Math.sign($0)", glsl: "sign($0)" },
-  floor: { arity: 1, js: "Math.floor($0)", glsl: "floor($0)" },
-  ceil: { arity: 1, js: "Math.ceil($0)", glsl: "ceil($0)" },
-  round: { arity: 1, js: "Math.round($0)", glsl: "floor($0 + 0.5)" },
-  min: { arity: 2, js: "Math.min($0, $1)", glsl: "min($0, $1)" },
-  max: { arity: 2, js: "Math.max($0, $1)", glsl: "max($0, $1)" },
-  mod: { arity: 2, js: "__mod($0, $1)", glsl: "mod($0, $1)" },
-  hypot: { arity: 2, js: "Math.hypot($0, $1)", glsl: "length(vec2($0, $1))" },
-  pow: { arity: 2, js: "__pow($0, $1)", glsl: "gr_pow($0, $1)" }
+  sin: { arity: 1, js: "Math.sin($0)", glsl: "sin($0)", fn: Math.sin },
+  cos: { arity: 1, js: "Math.cos($0)", glsl: "cos($0)", fn: Math.cos },
+  tan: { arity: 1, js: "Math.tan($0)", glsl: "tan($0)", fn: Math.tan },
+  asin: { arity: 1, js: "Math.asin($0)", glsl: "asin($0)", fn: Math.asin },
+  acos: { arity: 1, js: "Math.acos($0)", glsl: "acos($0)", fn: Math.acos },
+  atan: { arity: 1, js: "Math.atan($0)", glsl: "atan($0)", fn: Math.atan },
+  atan2: { arity: 2, js: "Math.atan2($0, $1)", glsl: "atan($0, $1)", fn: Math.atan2 },
+  sinh: { arity: 1, js: "Math.sinh($0)", glsl: "sinh($0)", fn: Math.sinh },
+  cosh: { arity: 1, js: "Math.cosh($0)", glsl: "cosh($0)", fn: Math.cosh },
+  tanh: { arity: 1, js: "Math.tanh($0)", glsl: "tanh($0)", fn: Math.tanh },
+  exp: { arity: 1, js: "Math.exp($0)", glsl: "exp($0)", fn: Math.exp },
+  ln: { arity: 1, js: "Math.log($0)", glsl: "log($0)", fn: Math.log },
+  log: {
+    arity: [1, 2],
+    js: "__log($0, $1)",
+    glsl: "gr_log($0, $1)",
+    fn: (a, b) => b === void 0 ? Math.log10(a) : Math.log(a) / Math.log(b)
+  },
+  sqrt: { arity: 1, js: "Math.sqrt($0)", glsl: "sqrt($0)", fn: Math.sqrt },
+  cbrt: { arity: 1, js: "Math.cbrt($0)", glsl: "gr_cbrt($0)", fn: Math.cbrt },
+  abs: { arity: 1, js: "Math.abs($0)", glsl: "abs($0)", fn: Math.abs },
+  sign: { arity: 1, js: "Math.sign($0)", glsl: "sign($0)", fn: Math.sign },
+  floor: { arity: 1, js: "Math.floor($0)", glsl: "floor($0)", fn: Math.floor },
+  ceil: { arity: 1, js: "Math.ceil($0)", glsl: "ceil($0)", fn: Math.ceil },
+  round: { arity: 1, js: "Math.round($0)", glsl: "floor($0 + 0.5)", fn: Math.round },
+  min: { arity: 2, js: "Math.min($0, $1)", glsl: "min($0, $1)", fn: Math.min },
+  max: { arity: 2, js: "Math.max($0, $1)", glsl: "max($0, $1)", fn: Math.max },
+  mod: { arity: 2, js: "__mod($0, $1)", glsl: "mod($0, $1)", fn: floorMod },
+  hypot: { arity: 2, js: "Math.hypot($0, $1)", glsl: "length(vec2($0, $1))", fn: Math.hypot },
+  pow: { arity: 2, js: "__pow($0, $1)", glsl: "gr_pow($0, $1)", fn: realPow }
 };
 var FUNCTION_NAMES = new Set(Object.keys(FUNCTIONS));
 function arityRange(fn) {
@@ -144,9 +198,42 @@ var ParseError = class extends Error {
     this.name = "ParseError";
   }
 };
-var OPERATORS = ["<=", ">=", "==", "!=", "+", "-", "*", "/", "^", "=", "<", ">"];
+var OPERATORS = [
+  "<=",
+  ">=",
+  "==",
+  "!=",
+  "+",
+  "-",
+  "*",
+  "/",
+  "^",
+  "=",
+  "<",
+  ">"
+];
+var OPERATOR_ALIASES = {
+  "\u2264": "<=",
+  "\u2265": ">=",
+  "\u2212": "-",
+  "\xD7": "*",
+  "\xB7": "*",
+  "\xF7": "/"
+};
+var SINGLE = {
+  "(": "lparen",
+  ")": "rparen",
+  "[": "lbracket",
+  "]": "rbracket",
+  "{": "lbrace",
+  "}": "rbrace",
+  ",": "comma",
+  ";": "semicolon",
+  "'": "prime",
+  "\u2032": "prime"
+};
 var isDigit = (c) => c >= "0" && c <= "9";
-var isIdentStart = (c) => c >= "a" && c <= "z" || c >= "A" && c <= "Z" || c === "_" || c.charCodeAt(0) > 127;
+var isIdentStart = (c) => c >= "a" && c <= "z" || c >= "A" && c <= "Z" || c === "_" || c.charCodeAt(0) > 127 && !(c in OPERATOR_ALIASES) && !(c in SINGLE);
 var isIdentPart = (c) => isIdentStart(c) || isDigit(c);
 function tokenize(source) {
   const tokens = [];
@@ -178,26 +265,34 @@ function tokenize(source) {
           i = save;
         }
       }
-      tokens.push({ kind: "number", text: source.slice(start, i), start, end: i });
+      tokens.push({
+        kind: "number",
+        text: source.slice(start, i),
+        start,
+        end: i
+      });
+      continue;
+    }
+    const single = SINGLE[c];
+    if (single) {
+      tokens.push({ kind: single, text: c, start: i, end: ++i });
+      continue;
+    }
+    const alias = OPERATOR_ALIASES[c];
+    if (alias) {
+      tokens.push({ kind: "op", text: alias, start: i, end: ++i });
       continue;
     }
     if (isIdentStart(c)) {
       const start = i;
       while (i < source.length && isIdentPart(source[i]))
         i++;
-      tokens.push({ kind: "ident", text: source.slice(start, i), start, end: i });
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") {
-      tokens.push({ kind: "lparen", text: c, start: i, end: ++i });
-      continue;
-    }
-    if (c === ")" || c === "]" || c === "}") {
-      tokens.push({ kind: "rparen", text: c, start: i, end: ++i });
-      continue;
-    }
-    if (c === ",") {
-      tokens.push({ kind: "comma", text: c, start: i, end: ++i });
+      tokens.push({
+        kind: "ident",
+        text: source.slice(start, i),
+        start,
+        end: i
+      });
       continue;
     }
     const op = OPERATORS.find((o) => source.startsWith(o, i));
@@ -208,27 +303,72 @@ function tokenize(source) {
     }
     throw new ParseError(`Unexpected character ${JSON.stringify(c)}`, i, i + 1);
   }
-  tokens.push({ kind: "eof", text: "", start: source.length, end: source.length });
+  tokens.push({
+    kind: "eof",
+    text: "",
+    start: source.length,
+    end: source.length
+  });
   return tokens;
 }
 
 // ../core/dist/parser.js
 var RELATION_OPS = /* @__PURE__ */ new Set(["=", "==", "<", ">", "<=", ">="]);
+var DIFFERENTIAL = /^[d∂]([A-Za-zͰ-Ͽ](?:_[A-Za-z0-9]+|[0-9]+)?)$/;
+var OPERATOR_D = /* @__PURE__ */ new Set(["d", "\u2202"]);
 var Parser = class {
   tokens;
   pos = 0;
   constructor(tokens) {
     this.tokens = tokens;
   }
-  peek() {
-    return this.tokens[this.pos];
+  peek(offset = 0) {
+    return this.tokens[Math.min(this.pos + offset, this.tokens.length - 1)];
   }
   next() {
     return this.tokens[this.pos++];
   }
-  isOp(text) {
-    const t = this.peek();
+  isOp(text, offset = 0) {
+    const t = this.peek(offset);
     return t.kind === "op" && t.text === text;
+  }
+  expect(kind, message) {
+    const t = this.next();
+    if (t.kind !== kind)
+      throw new ParseError(message, t.start, t.end);
+    return t;
+  }
+  parseEntry() {
+    const statement = this.parseStatement();
+    let intervals = null;
+    let conditions = null;
+    let axes = null;
+    for (; ; ) {
+      const t = this.peek();
+      if (t.kind === "lbracket") {
+        const group = this.parseBracketGroup();
+        if (group.kind === "conditions") {
+          if (conditions)
+            throw new ParseError("Put all conditions in one [...]", t.start, t.end);
+          conditions = group.conditions;
+        } else {
+          if (intervals) {
+            throw new ParseError("Put all ranges in one [...], separated by ;", t.start, t.end);
+          }
+          intervals = group.intervals;
+        }
+      } else if (t.kind === "lbrace") {
+        if (axes)
+          throw new ParseError("Axes are already named", t.start, t.end);
+        axes = this.parseAxes();
+      } else if (t.kind === "eof") {
+        break;
+      } else {
+        const what = t.kind === "rparen" ? "unmatched closing bracket" : `unexpected ${JSON.stringify(t.text)}`;
+        throw new ParseError(`Could not parse: ${what}`, t.start, t.end);
+      }
+    }
+    return { statement, intervals, conditions, axes };
   }
   parseStatement() {
     const left = this.parseAdditive();
@@ -236,19 +376,84 @@ var Parser = class {
     if (t.kind === "op" && RELATION_OPS.has(t.text)) {
       this.next();
       const right = this.parseAdditive();
-      this.expectEnd();
       const op = t.text === "==" ? "=" : t.text;
       return { kind: "relation", op, left, right };
     }
-    this.expectEnd();
     return { kind: "expr", expr: left };
   }
-  expectEnd() {
-    const t = this.peek();
-    if (t.kind !== "eof") {
-      const what = t.kind === "rparen" ? "unmatched closing bracket" : `unexpected ${JSON.stringify(t.text)}`;
-      throw new ParseError(`Could not parse: ${what}`, t.start, t.end);
+  parseBracketGroup() {
+    const open = this.next();
+    if (this.peek().kind === "rbracket") {
+      throw new ParseError("Empty brackets", open.start, this.peek().end);
     }
+    const rows = [];
+    let row = [];
+    for (; ; ) {
+      const left = this.parseAdditive();
+      let right = null;
+      const t = this.peek();
+      if (t.kind === "op" && (t.text === "=" || t.text === "==")) {
+        this.next();
+        right = this.parseAdditive();
+      } else if (t.kind === "op" && RELATION_OPS.has(t.text)) {
+        throw new ParseError("Conditions use =", t.start, t.end);
+      }
+      row.push({ left, right });
+      const sep = this.next();
+      if (sep.kind === "comma")
+        continue;
+      if (sep.kind === "semicolon") {
+        rows.push(row);
+        row = [];
+        continue;
+      }
+      if (sep.kind === "rbracket") {
+        rows.push(row);
+        break;
+      }
+      throw new ParseError("Expected , ; or ] here", sep.start, sep.end);
+    }
+    const items = rows.flat();
+    const relations = items.filter((i) => i.right !== null).length;
+    if (relations > 0 && relations < items.length) {
+      throw new ParseError("Keep ranges and conditions in separate brackets", open.start, open.end);
+    }
+    if (relations > 0) {
+      return {
+        kind: "conditions",
+        conditions: items.map((i) => ({ left: i.left, right: i.right }))
+      };
+    }
+    const intervals = rows.map((r) => {
+      if (r.length !== 2 && r.length !== 3) {
+        throw new ParseError("A range is [low, high] or [low, high, step]; separate axes with ;", open.start, open.end);
+      }
+      return { lo: r[0].left, hi: r[1].left, step: r[2]?.left ?? null };
+    });
+    return { kind: "intervals", intervals };
+  }
+  parseAxes() {
+    const open = this.next();
+    const names = [];
+    for (; ; ) {
+      const t = this.expect("ident", "Axes are names, like {q, p}");
+      if (FUNCTIONS[t.text] || CONSTANTS[t.text] !== void 0) {
+        throw new ParseError(`${t.text} can't be an axis`, t.start, t.end);
+      }
+      if (names.includes(t.text))
+        throw new ParseError(`${t.text} is listed twice`, t.start, t.end);
+      names.push(t.text);
+      const sep = this.next();
+      if (sep.kind === "comma")
+        continue;
+      if (sep.kind === "rbrace")
+        break;
+      throw new ParseError("Expected , or } here", sep.start, sep.end);
+    }
+    if (names.length < 2 || names.length > 3) {
+      throw new ParseError("Name two or three axes, like {q, p}", open.start, open.end);
+    }
+    return names;
   }
   parseAdditive() {
     let left = this.parseMultiplicative();
@@ -300,6 +505,30 @@ var Parser = class {
     }
     return base;
   }
+  countPrimes() {
+    let primes = 0;
+    while (this.peek().kind === "prime") {
+      this.next();
+      primes++;
+    }
+    return primes;
+  }
+  parseArgs(name) {
+    const open = this.next();
+    if (this.peek().kind === "rparen") {
+      throw new ParseError(`${name.text}() needs an argument`, name.start, this.peek().end);
+    }
+    const args = [this.parseAdditive()];
+    while (this.peek().kind === "comma") {
+      this.next();
+      args.push(this.parseAdditive());
+    }
+    const close = this.next();
+    if (close.kind !== "rparen") {
+      throw new ParseError(`Missing closing bracket for ${name.text}`, open.start, close.end);
+    }
+    return args;
+  }
   parsePrimary() {
     const t = this.next();
     if (t.kind === "number") {
@@ -310,57 +539,139 @@ var Parser = class {
       return { kind: "num", value };
     }
     if (t.kind === "lparen") {
-      const inner = this.parseAdditive();
-      const close = this.next();
-      if (close.kind !== "rparen") {
-        throw new ParseError("Missing closing bracket", t.start, close.end);
+      const first = this.parseAdditive();
+      if (this.peek().kind === "comma") {
+        const items = [first];
+        while (this.peek().kind === "comma") {
+          this.next();
+          items.push(this.parseAdditive());
+        }
+        const close2 = this.next();
+        if (close2.kind !== "rparen")
+          throw new ParseError("Missing closing bracket", t.start, close2.end);
+        if (items.length > 3) {
+          throw new ParseError("Points and parametric plots have 2 or 3 coordinates", t.start, close2.end);
+        }
+        return { kind: "tuple", items };
       }
-      return inner;
+      const close = this.next();
+      if (close.kind !== "rparen")
+        throw new ParseError("Missing closing bracket", t.start, close.end);
+      return first;
     }
     if (t.kind === "ident") {
+      const leibniz = this.parseLeibniz(t);
+      if (leibniz)
+        return leibniz;
       const name = t.text;
+      const primes = this.countPrimes();
       const fn = FUNCTIONS[name];
       if (fn) {
-        const [min, max] = arityRange(fn);
         let args;
         if (this.peek().kind === "lparen") {
-          this.next();
-          args = [];
-          if (this.peek().kind !== "rparen") {
-            args.push(this.parseAdditive());
-            while (this.peek().kind === "comma") {
-              this.next();
-              args.push(this.parseAdditive());
-            }
-          }
-          const close = this.next();
-          if (close.kind !== "rparen") {
-            throw new ParseError(`Missing closing bracket for ${name}`, t.start, close.end);
-          }
+          args = this.parseArgs(t);
         } else if (this.startsImplicitFactor()) {
           args = [this.parseUnary()];
         } else {
           throw new ParseError(`${name} needs an argument`, t.start, t.end);
         }
+        const [min, max] = arityRange(fn);
         if (args.length < min || args.length > max) {
           const want = min === max ? `${min}` : `${min} to ${max}`;
           throw new ParseError(`${name} takes ${want} argument${max === 1 ? "" : "s"}, got ${args.length}`, t.start, t.end);
         }
-        return { kind: "call", name, args };
+        return primes > 0 ? { kind: "apply", name, args, primes } : { kind: "call", name, args };
       }
       const constant = CONSTANTS[name];
-      if (constant !== void 0)
+      if (constant !== void 0 && primes === 0)
         return { kind: "num", value: constant };
+      if (this.peek().kind === "lparen") {
+        return { kind: "apply", name, args: this.parseArgs(t), primes };
+      }
+      if (primes > 0) {
+        return { kind: "deriv", expr: { kind: "var", name }, variable: null, order: primes };
+      }
       return { kind: "var", name };
     }
     throw new ParseError(t.kind === "eof" ? "Expression is incomplete" : `Unexpected ${JSON.stringify(t.text)}`, t.start, t.end);
   }
+  /**
+   * Leibniz derivatives, tried right after an identifier is read:
+   *
+   *   dp/dq             derivative of p with respect to q
+   *   d^2p/dq^2         second derivative
+   *   d/dx x^2          operator form, applied to the next factor
+   *   d^2/dx^2 sin(x)   operator form, second order
+   *
+   * Each form is matched in full by lookahead first, so `d^2 + 1` and `d/2`
+   * stay ordinary arithmetic.
+   */
+  parseLeibniz(first) {
+    const ident = (offset) => {
+      const tok = this.peek(offset);
+      return tok.kind === "ident" ? tok : null;
+    };
+    const integer = (offset) => {
+      const tok = this.peek(offset);
+      if (tok.kind !== "number" || !/^\d+$/.test(tok.text))
+        return null;
+      const value = Number(tok.text);
+      return value >= 1 && value <= 8 ? value : null;
+    };
+    const differential = (offset) => {
+      const tok = ident(offset);
+      return tok ? DIFFERENTIAL.exec(tok.text)?.[1] ?? null : null;
+    };
+    const operand = () => {
+      if (!this.startsImplicitFactor() && !this.isOp("-")) {
+        const t = this.peek();
+        throw new ParseError("Say what to differentiate, like d/dx x^2", t.start, t.end);
+      }
+      return this.parseUnary();
+    };
+    if (OPERATOR_D.has(first.text)) {
+      const wrt2 = this.isOp("/") ? differential(1) : null;
+      if (wrt2 && !this.isOp("^", 2)) {
+        this.pos += 2;
+        return { kind: "deriv", expr: operand(), variable: wrt2, order: 1 };
+      }
+      const order = this.isOp("^") ? integer(1) : null;
+      if (order !== null) {
+        const opVariable = differential(3);
+        if (this.isOp("/", 2) && opVariable && this.isOp("^", 4) && integer(5) === order) {
+          this.pos += 6;
+          return { kind: "deriv", expr: operand(), variable: opVariable, order };
+        }
+        const target2 = ident(2);
+        const variable = differential(4);
+        if (target2 && !FUNCTIONS[target2.text] && this.isOp("/", 3) && variable && this.isOp("^", 5) && integer(6) === order) {
+          this.pos += 7;
+          return { kind: "deriv", expr: { kind: "var", name: target2.text }, variable, order };
+        }
+      }
+      return null;
+    }
+    const target = DIFFERENTIAL.exec(first.text)?.[1];
+    const wrt = target && this.isOp("/") ? differential(1) : null;
+    if (target && wrt && !this.isOp("^", 2)) {
+      this.pos += 2;
+      return { kind: "deriv", expr: { kind: "var", name: target }, variable: wrt, order: 1 };
+    }
+    return null;
+  }
 };
-function parse(source) {
+function parseEntry(source) {
   const trimmed = source.trim();
   if (trimmed === "")
     throw new ParseError("Empty expression", 0, 0);
-  return new Parser(tokenize(trimmed)).parseStatement();
+  return new Parser(tokenize(trimmed)).parseEntry();
+}
+function parse(source) {
+  const entry = parseEntry(source);
+  if (entry.intervals || entry.conditions || entry.axes) {
+    throw new ParseError("Ranges, conditions and axes need the full document", 0, source.length);
+  }
+  return entry.statement;
 }
 
 // ../core/dist/classify.js
@@ -372,6 +683,10 @@ function dimensionOf(graph) {
   return graph.type === "surface3d" || graph.type === "implicit3d" ? 3 : 2;
 }
 function classify(statement) {
+  const sides = statement.kind === "expr" ? [statement.expr] : [statement.left, statement.right];
+  if (sides.some((e) => someNode(e, (n) => n.kind === "apply" || n.kind === "deriv" || n.kind === "tuple"))) {
+    throw new ParseError("Functions, derivatives and parametric plots need the full document", 0, 0);
+  }
   const graph = toGraph(statement);
   const fieldExpr = graph.type === "explicit2d" || graph.type === "surface3d" ? graph.fn : graph.field;
   const vars = freeVars(fieldExpr, CONSTANT_NAMES);
@@ -478,6 +793,10 @@ function toGlslSource(expr, options = {}) {
         }
         return fill(fn.glsl, args);
       }
+      case "apply":
+      case "deriv":
+      case "tuple":
+        throw new Error("Resolve functions, derivatives and tuples before compiling to GLSL");
     }
   };
   return go(expr);
@@ -570,6 +889,25 @@ function niceStep(span, pixels, targetPx = 70) {
 
 // ../core/dist/typeface.js
 var EMPTY_GLYPH = { width: 0, height: 0, left: 0, top: 0, coverage: new Float32Array(0) };
+
+// ../core/dist/ode.js
+var SCAN = (() => {
+  const count = 96;
+  const reach = Math.asinh(1e3);
+  return Float64Array.from({ length: count }, (_, i) => Math.sinh(-reach + 2 * reach * i / (count - 1)));
+})();
+
+// ../core/dist/document.js
+var TWO_PI = 2 * Math.PI;
+
+// ../core/dist/render3d.js
+var DEFAULT_ORBIT = {
+  target: [0, 0, 0],
+  distance: 5.4,
+  yaw: -Math.PI / 3,
+  pitch: 0.5,
+  fovY: Math.PI / 4
+};
 
 // src/gl.ts
 function createProgram(gl2, vertex, fragment2) {

@@ -1,4 +1,4 @@
-import { type Expr, type Statement, binary, freeVars, num } from "./ast.js";
+import { type Expr, type Statement, binary, freeVars, num, someNode } from "./ast.js";
 import { CONSTANT_NAMES } from "./builtins.js";
 import { ParseError } from "./lexer.js";
 
@@ -49,6 +49,10 @@ export function dimensionOf(graph: Graph): 2 | 3 {
  * `y = x^2` on the fast path while `x^2 + y^2 = 1` falls through to implicit.
  */
 export function classify(statement: Statement): Classified {
+  const sides = statement.kind === "expr" ? [statement.expr] : [statement.left, statement.right];
+  if (sides.some((e) => someNode(e, (n) => n.kind === "apply" || n.kind === "deriv" || n.kind === "tuple"))) {
+    throw new ParseError("Functions, derivatives and parametric plots need the full document", 0, 0);
+  }
   const graph = toGraph(statement);
   const fieldExpr =
     graph.type === "explicit2d" || graph.type === "surface3d" ? graph.fn : graph.field;

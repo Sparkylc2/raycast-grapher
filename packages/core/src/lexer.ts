@@ -4,7 +4,13 @@ export type TokenKind =
   | "op"
   | "lparen"
   | "rparen"
+  | "lbracket"
+  | "rbracket"
+  | "lbrace"
+  | "rbrace"
   | "comma"
+  | "semicolon"
+  | "prime"
   | "eof";
 
 export interface Token {
@@ -26,11 +32,54 @@ export class ParseError extends Error {
 }
 
 /** Multi-character operators must be tried before their single-char prefixes. */
-const OPERATORS = ["<=", ">=", "==", "!=", "+", "-", "*", "/", "^", "=", "<", ">"] as const;
+const OPERATORS = [
+  "<=",
+  ">=",
+  "==",
+  "!=",
+  "+",
+  "-",
+  "*",
+  "/",
+  "^",
+  "=",
+  "<",
+  ">",
+] as const;
+
+/** Typographic spellings people paste in, mapped to the ASCII operator. */
+const OPERATOR_ALIASES: Readonly<Record<string, string>> = {
+  "≤": "<=",
+  "≥": ">=",
+  "−": "-",
+  "×": "*",
+  "·": "*",
+  "÷": "/",
+};
+
+/**
+ * Brackets are no longer interchangeable with parentheses: `[...]` carries
+ * ranges and conditions and `{...}` names the axes, so each gets its own kind.
+ */
+const SINGLE: Readonly<Record<string, TokenKind>> = {
+  "(": "lparen",
+  ")": "rparen",
+  "[": "lbracket",
+  "]": "rbracket",
+  "{": "lbrace",
+  "}": "rbrace",
+  ",": "comma",
+  ";": "semicolon",
+  "'": "prime",
+  "′": "prime",
+};
 
 const isDigit = (c: string): boolean => c >= "0" && c <= "9";
 const isIdentStart = (c: string): boolean =>
-  (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c === "_" || c.charCodeAt(0) > 127;
+  (c >= "a" && c <= "z") ||
+  (c >= "A" && c <= "Z") ||
+  c === "_" ||
+  (c.charCodeAt(0) > 127 && !(c in OPERATOR_ALIASES) && !(c in SINGLE));
 const isIdentPart = (c: string): boolean => isIdentStart(c) || isDigit(c);
 
 export function tokenize(source: string): Token[] {
@@ -64,27 +113,36 @@ export function tokenize(source: string): Token[] {
           i = save;
         }
       }
-      tokens.push({ kind: "number", text: source.slice(start, i), start, end: i });
+      tokens.push({
+        kind: "number",
+        text: source.slice(start, i),
+        start,
+        end: i,
+      });
+      continue;
+    }
+
+    const single = SINGLE[c];
+    if (single) {
+      tokens.push({ kind: single, text: c, start: i, end: ++i });
+      continue;
+    }
+
+    const alias = OPERATOR_ALIASES[c];
+    if (alias) {
+      tokens.push({ kind: "op", text: alias, start: i, end: ++i });
       continue;
     }
 
     if (isIdentStart(c)) {
       const start = i;
       while (i < source.length && isIdentPart(source[i]!)) i++;
-      tokens.push({ kind: "ident", text: source.slice(start, i), start, end: i });
-      continue;
-    }
-
-    if (c === "(" || c === "[" || c === "{") {
-      tokens.push({ kind: "lparen", text: c, start: i, end: ++i });
-      continue;
-    }
-    if (c === ")" || c === "]" || c === "}") {
-      tokens.push({ kind: "rparen", text: c, start: i, end: ++i });
-      continue;
-    }
-    if (c === ",") {
-      tokens.push({ kind: "comma", text: c, start: i, end: ++i });
+      tokens.push({
+        kind: "ident",
+        text: source.slice(start, i),
+        start,
+        end: i,
+      });
       continue;
     }
 
@@ -98,6 +156,11 @@ export function tokenize(source: string): Token[] {
     throw new ParseError(`Unexpected character ${JSON.stringify(c)}`, i, i + 1);
   }
 
-  tokens.push({ kind: "eof", text: "", start: source.length, end: source.length });
+  tokens.push({
+    kind: "eof",
+    text: "",
+    start: source.length,
+    end: source.length,
+  });
   return tokens;
 }

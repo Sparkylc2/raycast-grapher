@@ -49,20 +49,84 @@ downstream is a backend over that tree:
 Adding a function means one entry in `builtins.ts`, which carries its JS and
 GLSL spellings side by side so the two backends cannot drift.
 
-## Five graph shapes
+## A document, not a list of expressions
 
-`classify.ts` reduces any statement to one of five forms. The implicit forms are
-the general case and the explicit ones are fast paths, so an expression that
-resists solving still plots rather than erroring.
+`document.ts` analyses every line together, because a line's meaning depends on
+the others. `f(3)` is a call if some line defines `f(x) = ...` and f times 3
+otherwise; `a` is a slider if a line says `a = 2`; `dp/dq` is an unknown only
+when nothing defines p. So analysis runs in three passes:
 
-| Input | Shape |
+1. **Parse.** `parser.ts` records what was written: statements, `[...]` ranges,
+   `[...]` conditions and `{...}` axes. It never decides meaning.
+2. **Collect definitions.** `name(args) = body` defines a function and
+   `name = expression` defines a constant, a slider when the right side is a
+   number. Duplicates and cycles become errors on every line involved.
+3. **Resolve and classify.** Functions are expanded, derivatives worked out, and
+   each remaining line becomes a curve, region, parametric plot, point, surface,
+   differential equation or PDE.
+
+Names nothing defines evaluate as 1 and are reported, so a half-written
+document still draws and the extension can offer those names as sliders.
+Compiled functions read every such name from a parameter object passed on each
+call, so moving a slider re-runs analysis but reuses the compiled code.
+
+| Input | Becomes |
 | --- | --- |
-| `y = sin(x)` | explicit 2D curve |
-| `x^2 + y^2 = 9` | implicit 2D curve |
-| `3x + 5 = 7` | implicit 2D curve, a vertical line at x = 2/3 |
-| `y < 0.3 x^2 - 4` | shaded 2D region |
-| `z = sin(x) cos(y)` | 3D height field |
-| `x^2 + y^2 + z^2 = 4` | 3D implicit surface |
+| `y = sin(x)` | explicit curve |
+| `x^2 + y^2 = 9`, `3x + 5 = 7` | implicit curve |
+| `y < 0.3 x^2 - 4` | shaded region |
+| `(cos t, sin t)`, `(1, 2)` | parametric curve, point |
+| `z = sin(x) cos(y)`, `x^2 + y^2 + z^2 = 4` | surface, implicit surface |
+| `y' = y [y(0) = 1]` | ordinary differential equation |
+| `u_t = u_xx [u(x, 0) = sin(x)]` | partial differential equation |
+
+Axes in braces rename the coordinates, so `{q, p}` plots p against q. Ranges map
+to the axes in the same order, except for parametric plots, where they bound
+the parameters instead.
+
+## Exact derivatives
+
+`symbolic.ts` differentiates on the tree, with simplifying constructors that
+fold constants and drop zero and unit terms as the result is built. `f'(x)`,
+`d/dx`, `d^2/dx^2` and primed built-ins all resolve before compiling, so a
+derivative plots as exactly as the function does, at any zoom. A test checks
+every built-in against finite differences.
+
+The same machinery answers a question the solvers need: whether an equation is
+linear in its highest derivative. It is when the second derivative with respect
+to that derivative simplifies to zero.
+
+## Differential equations
+
+An ODE is kept in the implicit form F(t, y, y', ..., y⁽ⁿ⁾) = 0 and never
+rearranged. At each RK4 stage `ode.ts` solves for the highest derivative: in
+closed form when F is linear in it, otherwise by Newton's method seeded from
+the previous step, which keeps a solution on one branch. When Newton fails it
+scans for every real root and takes the nearest. First-order equations also
+draw a slope field, with every real slope at each grid point, so an equation
+like `(y')^2 = x^2 + y^2` shows both branches.
+
+Solutions integrate backward and forward from wherever the starting values were
+given, and stop cleanly where they blow up or leave the real numbers. Tests
+compare against e^t, sin t and an equation that has no explicit form.
+
+`pde.ts` handles one space variable evolving in time: central differences in
+space and RK4 in time, the method of lines. The time step comes from probing
+how strongly the solved time derivative responds to each spatial derivative,
+which is the diffusion, advection, dispersion or wave-speed coefficient that sets
+RK4's stability limit. When the step would need too many iterations the grid
+coarsens instead. Tests compare the heat and wave equations against their exact
+solutions to within 0.002.
+
+## Intersections
+
+`intersect.ts` reduces every visible curve to segments about two pixels long,
+using marching squares for implicit curves, and intersects pairs of curves
+through a spatial hash. A crossing between two curves that both have a field is
+then polished with Newton's method, so a line meeting a circle reports √2 to
+nine decimal places. Parametric curves and solution curves have no field and
+stay at segment precision. Crossings are computed once the view settles and
+reused until it moves.
 
 ## Why the 2D renderer has no polylines
 
@@ -80,18 +144,29 @@ sampling, no adaptive subdivision, and no asymptote special-casing. The CPU
 sampler in `compile-js.ts` exists for the still-image path, not for the
 interactive one.
 
-## 3D plan
+## 3D in the panel
 
-Both 3D shapes reuse the same GLSL codegen.
+`mesh.ts` turns surfaces into triangles once per equation: grids for height
+fields, parametric surfaces and PDE solutions, and marching tetrahedra for
+implicit surfaces, chosen over marching cubes because it needs no case table
+and has no ambiguous cases. Implicit normals come from the field's gradient, so
+shading follows the true surface rather than the facets.
 
-- **Height fields** tessellate a grid and evaluate `f(x, y)` in the vertex
-  shader.
-- **Implicit surfaces** raymarch the field per pixel, stepping until the sign
-  flips and then bisecting, with the normal taken from a finite-difference
-  gradient.
+`render3d.ts` scales the plotting box onto a cube, so a surface spanning
+[-5, 5] by [0, 1] stays readable, then fills triangles with a depth buffer and
+two-sided lighting. The box, curves and points are depth-tested against the
+surfaces. Orbiting only re-projects the cached mesh, which is what makes
+keyboard rotation cheap enough to animate: a draft mesh is used while moving
+and a finer one once the view settles.
 
-Neither is wired up yet. `fragmentFor()` returns `null` for 3D graphs and the
-viewer reports it rather than failing silently.
+| Scene, 2x frame | Mesh | Draw |
+| --- | --- | --- |
+| `z = sin(x) cos(y)`, 18,000 triangles | 4 ms | 37 ms |
+| implicit surface, 24,000 triangles | 51 ms | 32 ms |
+
+Boxes derived from the data widen to round numbers so ticks land on the
+corners, and an implicit surface with no ranges shrinks its box to the surface
+it found.
 
 ## Painted plots in the panel
 
@@ -230,7 +305,8 @@ the same state seen two ways.
    browser ships today with no extra binary. A Tauri or Swift `WKWebView` shell
    feels like an app and survives independently, at the cost of a build step and
    a signed binary.
-2. **Live sync.** A WebSocket from Raycast to an already-open viewer would let
-   the graph update while you type, rather than only on open.
-3. **Parameters.** Free variables such as `a` in `y = a x` are already collected
-   by `classify()`. They want sliders in the viewer and possibly a Raycast form.
+2. **Teaching the viewer the document language.** It still classifies lines
+   one at a time, so functions, sliders, ranges and differential equations only
+   draw in Raycast.
+3. **Systems of equations.** Coupled ODEs such as predator-prey models need
+   more than one unknown per line, which the analyzer currently rejects.

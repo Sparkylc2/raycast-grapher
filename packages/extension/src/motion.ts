@@ -1,4 +1,4 @@
-import type { Camera2D } from "@grapher/core";
+import type { Camera2D, Camera3D } from "@grapher/core";
 
 /**
  * Animation rules with no Raycast imports, so they can be tested directly.
@@ -18,14 +18,21 @@ export const DEFAULT_FRAME_RATE = 30;
 /** Reads the frame-rate preference, falling back to the default for anything unexpected. */
 export function parseFrameRate(value: string | undefined): number {
   const rate = Number(value);
-  return (FRAME_RATES as readonly number[]).includes(rate) ? rate : DEFAULT_FRAME_RATE;
+  return (FRAME_RATES as readonly number[]).includes(rate)
+    ? rate
+    : DEFAULT_FRAME_RATE;
 }
 
 /** Eases the view toward the target by an amount set by elapsed time. */
-export function ease(from: Camera2D, to: Camera2D, elapsedMs: number): { camera: Camera2D; settled: boolean } {
+export function ease(
+  from: Camera2D,
+  to: Camera2D,
+  elapsedMs: number,
+): { camera: Camera2D; settled: boolean } {
   const k = 1 - Math.exp(-Math.max(0, elapsedMs) / EASE_MS);
   // Zoom interpolates in log space, so zooming in and out feel equally quick.
-  const logSpan = Math.log(from.spanY) + (Math.log(to.spanY) - Math.log(from.spanY)) * k;
+  const logSpan =
+    Math.log(from.spanY) + (Math.log(to.spanY) - Math.log(from.spanY)) * k;
   const camera: Camera2D = {
     cx: from.cx + (to.cx - from.cx) * k,
     cy: from.cy + (to.cy - from.cy) * k,
@@ -41,11 +48,42 @@ export function ease(from: Camera2D, to: Camera2D, elapsedMs: number): { camera:
 }
 
 /**
+ * The 3D counterpart of `ease`: yaw and pitch glide linearly and distance in
+ * log space, on the same elapsed-time schedule.
+ */
+export function ease3D(
+  from: Camera3D,
+  to: Camera3D,
+  elapsedMs: number,
+): { camera: Camera3D; settled: boolean } {
+  const k = 1 - Math.exp(-Math.max(0, elapsedMs) / EASE_MS);
+  const logDistance =
+    Math.log(from.distance) +
+    (Math.log(to.distance) - Math.log(from.distance)) * k;
+  const camera: Camera3D = {
+    ...to,
+    yaw: from.yaw + (to.yaw - from.yaw) * k,
+    pitch: from.pitch + (to.pitch - from.pitch) * k,
+    distance: Math.exp(logDistance),
+  };
+  // A thousandth of a radian is well under a pixel at the pane's size.
+  const settled =
+    Math.abs(camera.yaw - to.yaw) < 1e-3 &&
+    Math.abs(camera.pitch - to.pitch) < 1e-3 &&
+    Math.abs(Math.log(camera.distance / to.distance)) < 1e-3;
+  return { camera: settled ? to : camera, settled };
+}
+
+/**
  * Milliseconds to wait before the next frame. Measured from the last frame
  * actually drawn, so the cap still holds when key repeat retargets the view
  * faster than frames are allowed.
  */
-export function frameDelay(now: number, lastFrameAt: number, fps: number): number {
+export function frameDelay(
+  now: number,
+  lastFrameAt: number,
+  fps: number,
+): number {
   return Math.max(0, lastFrameAt + 1000 / fps - now);
 }
 
@@ -57,8 +95,16 @@ export function frameDelay(now: number, lastFrameAt: number, fps: number): numbe
  * fades that in once loaded. For a still that is invisible; during animation it
  * blanked every frame. Data URIs go straight to a plain image element.
  */
-export function imageMarkdown(png: Uint8Array, width: number, height: number): string {
-  const base64 = Buffer.from(png.buffer, png.byteOffset, png.byteLength).toString("base64");
+export function imageMarkdown(
+  png: Uint8Array,
+  width: number,
+  height: number,
+): string {
+  const base64 = Buffer.from(
+    png.buffer,
+    png.byteOffset,
+    png.byteLength,
+  ).toString("base64");
   // Raycast strips these size hints from the query before loading the image.
   return `![Plot](data:image/png;base64,${base64}?raycast-width=${width}&raycast-height=${height})`;
 }

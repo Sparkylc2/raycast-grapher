@@ -2,23 +2,22 @@ import { environment, getPreferenceValues } from "@raycast/api";
 import { useEffect, useRef, useState } from "react";
 import {
   type Camera2D,
-  type Classified,
-  type RenderLayer,
+  type Camera3D,
+  type Intersection,
+  type Plot2D,
+  type Scene3D,
+  type Surface3D,
   type Typeface,
   KANAGAWA_DRAGON,
   KANAGAWA_LOTUS,
-  classify,
-  parse,
-  renderScene,
+  buildScene3D,
+  findIntersections,
+  renderPlots,
+  renderScene3D,
 } from "@grapher/core";
 import { encodePng } from "@grapher/core/png";
 import { loadSystemTypeface } from "@grapher/core/system-font";
-import { ease, frameDelay, imageMarkdown, parseFrameRate } from "./motion.js";
-
-export interface PlotEntry {
-  readonly source: string;
-  readonly color: string;
-}
+import { ease, ease3D, frameDelay, imageMarkdown, parseFrameRate } from "./motion.js";
 
 /** Size the image is shown at in the detail pane, in display pixels. */
 export const PLOT_DISPLAY = { width: 460, height: 345 } as const;
@@ -37,32 +36,59 @@ export interface FrameStats {
   readonly renderMs: number | null;
 }
 
+export interface PlotInput {
+  /** Changes whenever what is plotted changes; plot closures are not comparable. */
+  readonly contentKey: string;
+  readonly dimension: 2 | 3;
+  readonly plots: readonly Plot2D[];
+  readonly surfaces: readonly Surface3D[];
+  /** Where the 2D view is heading. */
+  readonly camera: Camera2D;
+  /** Where the 3D view is heading. */
+  readonly orbit: Camera3D;
+  /** Changing this jumps straight to the targets instead of easing. */
+  readonly epoch: number;
+  readonly axisNames: readonly string[];
+  readonly playhead: number | null;
+  readonly highlight: number | null;
+}
+
 export interface PlotState {
   readonly markdownImage: string | null;
-  /** Parse errors, aligned with the entries passed in; null where the entry is fine. */
-  readonly errors: readonly (string | null)[];
   readonly stats: FrameStats | null;
   /** True while the view is still easing toward its target. */
   readonly moving: boolean;
+  /** Crossings in the settled 2D view, in the order they are stepped through. */
+  readonly intersections: readonly Intersection[];
 }
 
+interface Motion {
+  readonly started: number;
+  frames: number;
+  readonly renders: number[];
+}
+
+const SCENES_KEPT = 6;
+
 /**
- * Renders entries at an animated camera that eases toward `target`, never
- * faster than the frame-rate preference allows.
- *
- * Changing `epoch` snaps the view to the target without animating, for jumps
- * that should not glide, such as restoring the saved view on launch.
+ * Renders the current plots, easing the camera toward its target and never
+ * faster than the frame-rate preference allows. 3D meshes are built once per
+ * content and quality and reused for every orbit frame; intersections are
+ * found once the view settles and reused until it moves.
  */
-export function usePlot(entries: readonly PlotEntry[], target: Camera2D, epoch: number): PlotState {
-  const [state, setState] = useState<PlotState>({ markdownImage: null, errors: [], stats: null, moving: false });
+export function usePlot(input: PlotInput): PlotState {
+  const [state, setState] = useState<PlotState>({ markdownImage: null, stats: null, moving: false, intersections: [] });
   const [fontReady, setFontReady] = useState(false);
-  const shown = useRef<Camera2D>(target);
-  const shownEpoch = useRef(epoch);
+  const shown2d = useRef<Camera2D>(input.camera);
+  const shown3d = useRef<Camera3D>(input.orbit);
+  const shownEpoch = useRef(input.epoch);
   const typeface = useRef<Typeface | null>(null);
   const lastFrameAt = useRef(0);
+  const scenes = useRef(new Map<string, Scene3D>());
+  const crossings = useRef<{ key: string; points: Intersection[] } | null>(null);
   const frameRate = parseFrameRate(getPreferenceValues<{ frameRate?: string }>().frameRate);
 
-  // Loading SF is quick now, but it still waits for the first frame to go out.
+  // Loading SF is quick, but it still waits for the first frame to go out.
   useEffect(() => {
     const timer = setTimeout(() => {
       typeface.current = loadSystemTypeface();
@@ -71,33 +97,74 @@ export function usePlot(entries: readonly PlotEntry[], target: Camera2D, epoch: 
     return () => clearTimeout(timer);
   }, []);
 
-  const key = JSON.stringify({ entries, target, epoch, fontReady, frameRate, appearance: environment.appearance });
+  const key = JSON.stringify({
+    content: input.contentKey,
+    dimension: input.dimension,
+    view: input.dimension === 3 ? input.orbit : input.camera,
+    epoch: input.epoch,
+    playhead: input.playhead,
+    highlight: input.highlight,
+    axes: input.axisNames,
+    fontReady,
+    frameRate,
+    appearance: environment.appearance,
+  });
 
   useEffect(() => {
-    if (shownEpoch.current !== epoch) {
-      shownEpoch.current = epoch;
-      shown.current = target;
+    const { dimension, plots, surfaces, contentKey, playhead, highlight, axisNames } = input;
+    const target2d = input.camera;
+    const target3d = input.orbit;
+    if (shownEpoch.current !== input.epoch) {
+      shownEpoch.current = input.epoch;
+      shown2d.current = target2d;
+      shown3d.current = target3d;
     }
 
-    const { layers, errors } = buildLayers(entries);
     const theme = environment.appearance === "light" ? KANAGAWA_LOTUS : KANAGAWA_DRAGON;
     const face = typeface.current;
+    const crossingKey = `${contentKey}|${JSON.stringify(target2d)}`;
+    const cachedCrossings = (): Intersection[] =>
+      crossings.current?.key === crossingKey ? crossings.current.points : [];
+
+    const sceneFor = (quality: "draft" | "fine"): Scene3D => {
+      const sceneKey = `${contentKey}|${quality}`;
+      let scene = scenes.current.get(sceneKey);
+      if (!scene) {
+        if (scenes.current.size >= SCENES_KEPT) scenes.current.clear();
+        scene = buildScene3D(surfaces, quality);
+        scenes.current.set(sceneKey, scene);
+      }
+      return scene;
+    };
 
     let cancelled = false;
     let timer: NodeJS.Timeout | undefined;
     // Treat the first step as one frame period, so the first draft moves at all.
     let last = performance.now() - 1000 / frameRate;
-    const motion = { started: performance.now(), frames: 0, renders: [] as number[] };
+    const motion: Motion = { started: performance.now(), frames: 0, renders: [] };
 
-    const draw = (camera: Camera2D, ratio: 1 | 2): string => {
+    const draw = (ratio: 1 | 2): string => {
       const started = performance.now();
       const width = PLOT_DISPLAY.width * ratio;
       const height = PLOT_DISPLAY.height * ratio;
-      const rgba = renderScene(layers, camera, { width, height }, theme, {
-        transparent: true,
-        pixelRatio: ratio,
-        ...(face ? { typeface: face } : {}),
-      });
+      const common = { transparent: true, pixelRatio: ratio, ...(face ? { typeface: face } : {}) };
+      let rgba: Uint8ClampedArray;
+      if (dimension === 3) {
+        const names = axisNames.length === 3 ? (axisNames as [string, string, string]) : null;
+        rgba = renderScene3D(sceneFor(ratio === 1 ? "draft" : "fine"), shown3d.current, { width, height }, theme, {
+          ...common,
+          axisNames: names,
+        });
+      } else {
+        const points = cachedCrossings();
+        rgba = renderPlots(plots, shown2d.current, { width, height }, theme, {
+          ...common,
+          axisNames: [axisNames[0] ?? "x", axisNames[1] ?? "y"],
+          intersections: points,
+          highlight: points.length > 0 ? highlight : null,
+          playhead,
+        });
+      }
       // Drafts live for a few dozen milliseconds, so they take the fast compression level.
       const png = encodePng(rgba, width, height, { level: ratio === 1 ? 1 : 6 });
       if (ratio === 1) motion.renders.push(performance.now() - started);
@@ -108,21 +175,32 @@ export function usePlot(entries: readonly PlotEntry[], target: Camera2D, epoch: 
     const tick = (): void => {
       if (cancelled) return;
       const now = performance.now();
-      const step = ease(shown.current, target, now - last);
+      let settled: boolean;
+      if (dimension === 3) {
+        const step = ease3D(shown3d.current, target3d, now - last);
+        shown3d.current = step.camera;
+        settled = step.settled;
+      } else {
+        const step = ease(shown2d.current, target2d, now - last);
+        shown2d.current = step.camera;
+        settled = step.settled;
+      }
       last = now;
-      shown.current = step.camera;
 
-      const image = draw(step.camera, 1);
+      const image = draw(1);
       motion.frames++;
-      setState({ markdownImage: image, errors, stats: null, moving: !step.settled });
+      setState({ markdownImage: image, stats: null, moving: !settled, intersections: cachedCrossings() });
 
-      if (step.settled) {
+      if (settled) {
         const stats = summarise(motion, performance.now(), frameRate);
         timer = setTimeout(() => {
           if (cancelled) return;
+          if (dimension === 2 && crossings.current?.key !== crossingKey) {
+            crossings.current = { key: crossingKey, points: findIntersections(plots, target2d, PLOT_DISPLAY) };
+          }
           // Shows up in `ray develop` output.
           if (motion.frames > 1) console.log(`[grapher] ${describeStats(stats)}`);
-          setState({ markdownImage: draw(target, 2), errors, stats, moving: false });
+          setState({ markdownImage: draw(2), stats, moving: false, intersections: cachedCrossings() });
         }, REFINE_AFTER_MS);
         return;
       }
@@ -141,46 +219,13 @@ export function usePlot(entries: readonly PlotEntry[], target: Camera2D, epoch: 
   return state;
 }
 
-/**
- * Parsed graphs are cached by source. Keeping the same graph objects between
- * frames lets the renderer reuse compiled functions V8 has already optimised.
- */
-const classified = new Map<string, Classified | Error>();
-
-function classifyCached(source: string): Classified | Error {
-  let result = classified.get(source);
-  if (!result) {
-    try {
-      result = classify(parse(source));
-    } catch (error) {
-      result = error as Error;
-    }
-    // Typing produces a new source per keystroke; cap the cache rather than track usage.
-    if (classified.size > 500) classified.clear();
-    classified.set(source, result);
-  }
-  return result;
-}
-
-function buildLayers(entries: readonly PlotEntry[]): { layers: RenderLayer[]; errors: (string | null)[] } {
-  const layers: RenderLayer[] = [];
-  const errors = entries.map((entry) => {
-    const result = classifyCached(entry.source);
-    if (result instanceof Error) return result.message;
-    if (result.dimension === 3) return "3D graphs need the viewer window";
-    layers.push({ graph: result.graph, color: entry.color });
-    return null;
-  });
-  return { layers, errors };
-}
-
 const median = (values: readonly number[]): number | null => {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)]!;
 };
 
-function summarise(motion: { started: number; frames: number; renders: number[] }, now: number, cap: number): FrameStats {
+function summarise(motion: Motion, now: number, cap: number): FrameStats {
   const seconds = (now - motion.started) / 1000;
   return {
     frames: motion.frames,
