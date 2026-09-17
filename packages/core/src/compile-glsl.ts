@@ -63,7 +63,9 @@ export function toGlslSource(expr: Expr, options: GlslOptions = {}): string {
       case "binary": {
         const l = go(n.left);
         const r = go(n.right);
-        return n.op === "^" ? `gr_pow(${l}, ${r})` : `(${l} ${n.op} ${r})`;
+        if (n.op === "^" || n.op === ".^") return `gr_pow(${l}, ${r})`;
+        if (n.op === "\\") return `(${r} / ${l})`;
+        return `(${l} ${n.op === ".*" ? "*" : n.op === "./" ? "/" : n.op} ${r})`;
       }
       case "call": {
         const args = n.args.map(go);
@@ -83,7 +85,10 @@ export function toGlslSource(expr: Expr, options: GlslOptions = {}): string {
       case "apply":
       case "deriv":
       case "tuple":
-        throw new Error("Resolve functions, derivatives and tuples before compiling to GLSL");
+      case "matrix":
+      case "reduce":
+      case "integral":
+        throw new Error("Resolve functions, derivatives, matrices and ranges before compiling to GLSL");
     }
   };
 

@@ -20,7 +20,7 @@ import { loadSystemTypeface } from "@grapher/core/system-font";
 import { ease, ease3D, frameDelay, imageMarkdown, parseFrameRate } from "./motion.js";
 
 /** Size the image is shown at in the detail pane, in display pixels. */
-export const PLOT_DISPLAY = { width: 460, height: 345 } as const;
+export const PLOT_DISPLAY = { width: 460, height: 330 } as const;
 
 /** A sharp 2x frame replaces the 1x draft once the view has been still this long. */
 const REFINE_AFTER_MS = 160;
@@ -51,6 +51,8 @@ export interface PlotInput {
   readonly axisNames: readonly string[];
   readonly playhead: number | null;
   readonly highlight: number | null;
+  /** Look for crossings once the view settles; off where lines cross by design, as on a grid. */
+  readonly findCrossings?: boolean;
 }
 
 export interface PlotState {
@@ -104,6 +106,7 @@ export function usePlot(input: PlotInput): PlotState {
     epoch: input.epoch,
     playhead: input.playhead,
     highlight: input.highlight,
+    crossings: input.findCrossings ?? true,
     axes: input.axisNames,
     fontReady,
     frameRate,
@@ -112,6 +115,7 @@ export function usePlot(input: PlotInput): PlotState {
 
   useEffect(() => {
     const { dimension, plots, surfaces, contentKey, playhead, highlight, axisNames } = input;
+    const findCrossings = input.findCrossings ?? true;
     const target2d = input.camera;
     const target3d = input.orbit;
     if (shownEpoch.current !== input.epoch) {
@@ -195,7 +199,7 @@ export function usePlot(input: PlotInput): PlotState {
         const stats = summarise(motion, performance.now(), frameRate);
         timer = setTimeout(() => {
           if (cancelled) return;
-          if (dimension === 2 && crossings.current?.key !== crossingKey) {
+          if (dimension === 2 && findCrossings && crossings.current?.key !== crossingKey) {
             crossings.current = { key: crossingKey, points: findIntersections(plots, target2d, PLOT_DISPLAY) };
           }
           // Shows up in `ray develop` output.

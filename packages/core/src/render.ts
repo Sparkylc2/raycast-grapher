@@ -388,6 +388,7 @@ export function renderPlots(
   }
   for (const plot of plots) {
     if (plot.kind === "slopes") drawSlopes(canvas, coverage, plot, b, step, ratio, toPxX, toPxY);
+    if (plot.kind === "vectors") drawVectors(canvas, coverage, plot, b, ratio, toPxX, toPxY);
   }
   for (const plot of plots) {
     const color = hexToRgb(plot.color);
@@ -400,6 +401,17 @@ export function renderPlots(
         break;
       case "trajectory":
         drawTrajectory(canvas, coverage, plot, color, toPxX, toPxY, halfWidth, ratio, playhead, palette);
+        break;
+      case "arrow":
+        drawArrow(canvas, coverage, plot, color, toPxX, toPxY, halfWidth, ratio);
+        break;
+      case "orbit":
+        drawOrbit(canvas, coverage, plot, color, toPxX, toPxY, halfWidth, ratio, playhead, palette);
+        break;
+      case "equilibrium":
+        canvas.disc(toPxX(plot.x), toPxY(plot.y), 5.5 * ratio, palette.background, 0.9);
+        canvas.disc(toPxX(plot.x), toPxY(plot.y), 4.5 * ratio, color);
+        if (!plot.stable) canvas.disc(toPxX(plot.x), toPxY(plot.y), 2.6 * ratio, palette.background);
         break;
       case "point":
         canvas.disc(toPxX(plot.x), toPxY(plot.y), 5 * ratio, palette.background, 0.9);
@@ -815,6 +827,157 @@ function drawTrajectory(
       canvas.disc(toPxX(hx), toPxY(vy), 4.2 * ratio, color);
     }
   }
+}
+
+/**
+ * Arrows on a grid, pointing along a system's rate. Lengths grow with the
+ * square root of the speed, so slow regions still show their direction.
+ */
+function drawVectors(
+  canvas: Canvas,
+  coverage: Coverage,
+  plot: Plot2D & { kind: "vectors" },
+  b: Bounds,
+  ratio: number,
+  toPxX: (x: number) => number,
+  toPxY: (y: number) => number,
+): void {
+  const spacing = niceStep(b.maxY - b.minY, canvas.height / ratio, 30);
+  const unitX = canvas.width / (b.maxX - b.minX);
+  const unitY = canvas.height / (b.maxY - b.minY);
+  const out: number[] = [0, 0];
+  const samples: number[] = [];
+  let peak = 0;
+  for (let gy = Math.ceil(b.minY / spacing) * spacing; gy <= b.maxY; gy += spacing) {
+    if (!inRange(gy, plot.clipV)) continue;
+    for (let gx = Math.ceil(b.minX / spacing) * spacing; gx <= b.maxX; gx += spacing) {
+      if (!inRange(gx, plot.clipH)) continue;
+      plot.field(gx, gy, out);
+      const dx = out[0]! * unitX;
+      const dy = -out[1]! * unitY;
+      const speed = Math.hypot(dx, dy);
+      if (!(speed > 0) || !Number.isFinite(speed)) continue;
+      samples.push(toPxX(gx), toPxY(gy), dx / speed, dy / speed, speed);
+      peak = Math.max(peak, speed);
+    }
+  }
+  const longest = 0.8 * spacing * Math.min(unitX, unitY);
+  for (let i = 0; i < samples.length; i += 5) {
+    const [px, py, ux, uy, speed] = samples.slice(i, i + 5) as [number, number, number, number, number];
+    const length = longest * (0.3 + 0.7 * Math.sqrt(speed / peak));
+    const x1 = px + (ux * length) / 2;
+    const y1 = py + (uy * length) / 2;
+    coverage.segment(px - (ux * length) / 2, py - (uy * length) / 2, x1, y1, 0.7 * ratio);
+    const head = Math.min(4.5 * ratio, 0.45 * length);
+    for (const side of [1, -1]) {
+      const c = Math.cos(2.6);
+      const s = Math.sin(2.6) * side;
+      coverage.segment(x1, y1, x1 + (ux * c - uy * s) * head, y1 + (ux * s + uy * c) * head, 0.7 * ratio);
+    }
+  }
+  coverage.flush(canvas, hexToRgb(plot.color), 0.5);
+}
+
+function drawOrbit(
+  canvas: Canvas,
+  coverage: Coverage,
+  plot: Plot2D & { kind: "orbit" },
+  color: RGB,
+  toPxX: (x: number) => number,
+  toPxY: (y: number) => number,
+  halfWidth: number,
+  ratio: number,
+  playhead: number | null,
+  palette: Palette,
+): void {
+  const { h, v, t } = plot;
+  const n = t.length;
+  if (n === 0) return;
+  let last = n - 1;
+  if (playhead !== null) {
+    if (playhead < t[0]!) return;
+    let lo = 0;
+    let hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (t[mid]! <= playhead) lo = mid;
+      else hi = mid - 1;
+    }
+    last = lo;
+  }
+  for (let i = 1; i <= last; i++) {
+    coverage.segment(toPxX(h[i - 1]!), toPxY(v[i - 1]!), toPxX(h[i]!), toPxY(v[i]!), halfWidth);
+  }
+  coverage.flush(canvas, color);
+  canvas.disc(toPxX(plot.h0), toPxY(plot.v0), 3.6 * ratio, color);
+  canvas.disc(toPxX(plot.h0), toPxY(plot.v0), 2 * ratio, palette.background);
+  if (playhead !== null && last < n - 1) {
+    const w = (playhead - t[last]!) / (t[last + 1]! - t[last]!);
+    const x = h[last]! + (h[last + 1]! - h[last]!) * w;
+    const y = v[last]! + (v[last + 1]! - v[last]!) * w;
+    canvas.disc(toPxX(x), toPxY(y), 5.5 * ratio, palette.background, 0.9);
+    canvas.disc(toPxX(x), toPxY(y), 4.2 * ratio, color);
+  }
+}
+
+/** A shaft and a filled head, antialiased through the shared coverage buffer. */
+function drawArrow(
+  canvas: Canvas,
+  coverage: Coverage,
+  plot: Plot2D & { kind: "arrow" },
+  color: RGB,
+  toPxX: (x: number) => number,
+  toPxY: (y: number) => number,
+  halfWidth: number,
+  ratio: number,
+): void {
+  const x0 = toPxX(plot.x0);
+  const y0 = toPxY(plot.y0);
+  const x1 = toPxX(plot.x1);
+  const y1 = toPxY(plot.y1);
+  const length = Math.hypot(x1 - x0, y1 - y0);
+  if (!Number.isFinite(length)) return;
+  if (length < 1) {
+    canvas.disc(x1, y1, 3 * ratio, color);
+    return;
+  }
+  const ux = (x1 - x0) / length;
+  const uy = (y1 - y0) / length;
+  const head = Math.min(13 * ratio, 0.45 * length);
+  const baseX = x1 - ux * head;
+  const baseY = y1 - uy * head;
+  coverage.segment(x0, y0, baseX + ux * 0.5, baseY + uy * 0.5, halfWidth);
+
+  // The head is a triangle filled by distance to its three edges.
+  const spread = head * 0.42;
+  const corners: [number, number][] = [
+    [x1, y1],
+    [baseX - uy * spread, baseY + ux * spread],
+    [baseX + uy * spread, baseY - ux * spread],
+  ];
+  const area = (corners[1]![0] - corners[0]![0]) * (corners[2]![1] - corners[0]![1]) - (corners[1]![1] - corners[0]![1]) * (corners[2]![0] - corners[0]![0]);
+  const orientation = area > 0 ? 1 : -1;
+  const left = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[0])) - 1));
+  const right = Math.min(canvas.width - 1, Math.ceil(Math.max(...corners.map((c) => c[0])) + 1));
+  const top = Math.max(0, Math.floor(Math.min(...corners.map((c) => c[1])) - 1));
+  const bottom = Math.min(canvas.height - 1, Math.ceil(Math.max(...corners.map((c) => c[1])) + 1));
+  for (let py = top; py <= bottom; py++) {
+    for (let px = left; px <= right; px++) {
+      let inside = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const [ax, ay] = corners[k]!;
+        const [bx, by] = corners[(k + 1) % 3]!;
+        const ex = bx - ax;
+        const ey = by - ay;
+        const edge = Math.hypot(ex, ey) || 1;
+        const distance = (orientation * ((px + 0.5 - ax) * ey - (py + 0.5 - ay) * ex)) / edge;
+        inside = Math.min(inside, -distance);
+      }
+      const alpha = Math.max(0, Math.min(1, inside + 0.5));
+      if (alpha > 0) coverage.mark(px, py, alpha);
+    }
+  }
+  coverage.flush(canvas, color);
 }
 
 /**

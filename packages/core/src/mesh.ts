@@ -374,6 +374,14 @@ export function buildScene3D(surfaces: readonly Surface3D[], quality: MeshQualit
         }
         break;
       }
+      case "arrow3d": {
+        lines.push({ color: s.color, points: Float32Array.from([0, 0, 0, s.x, s.y, s.z]) });
+        points.push({ color: s.color, x: s.x, y: s.y, z: s.z });
+        bx = union(bx, { lo: Math.min(0, s.x), hi: Math.max(0, s.x) });
+        by = union(by, { lo: Math.min(0, s.y), hi: Math.max(0, s.y) });
+        bz = union(bz, { lo: Math.min(0, s.z), hi: Math.max(0, s.z) });
+        break;
+      }
       case "point3d":
         points.push({ color: s.color, x: s.x, y: s.y, z: s.z });
         bx = union(bx, { lo: s.x, hi: s.x });

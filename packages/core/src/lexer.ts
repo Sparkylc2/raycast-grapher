@@ -33,6 +33,11 @@ export class ParseError extends Error {
 
 /** Multi-character operators must be tried before their single-char prefixes. */
 const OPERATORS = [
+  // MATLAB's elementwise operators and left division.
+  ".*",
+  "./",
+  ".^",
+  "\\",
   "<=",
   ">=",
   "==",
@@ -119,6 +124,13 @@ export function tokenize(source: string): Token[] {
         start,
         end: i,
       });
+      continue;
+    }
+
+    // MATLAB's `.'` transpose reads as a prime; on a matrix, a prime transposes.
+    if (c === "." && source[i + 1] === "'") {
+      tokens.push({ kind: "prime", text: ".'", start: i, end: i + 2 });
+      i += 2;
       continue;
     }
 

@@ -1,4 +1,4 @@
-import { type Expr, exprEquals } from "./ast.js";
+import { type Expr, exprEquals, freeVars } from "./ast.js";
 import { FUNCTIONS, realPow } from "./builtins.js";
 
 /**
@@ -121,7 +121,14 @@ export function simplify(e: Expr): Expr {
         case "/":
           return div(l, r);
         case "^":
+        case ".^":
           return pow(l, r);
+        case ".*":
+          return mul(l, r);
+        case "./":
+          return div(l, r);
+        case "\\":
+          return div(r, l);
       }
       return e;
     }
@@ -133,6 +140,21 @@ export function simplify(e: Expr): Expr {
       return { ...e, expr: simplify(e.expr) };
     case "tuple":
       return { kind: "tuple", items: e.items.map(simplify) };
+    case "matrix":
+      return { kind: "matrix", rows: e.rows.map((row) => row.map(simplify)) };
+    case "integral":
+      return {
+        ...e,
+        expr: simplify(e.expr),
+        region: e.region && simplify(e.region),
+        bounds: e.bounds.map((b) => ({ variable: b.variable, lo: simplify(b.lo), hi: simplify(b.hi) })),
+      };
+    case "reduce":
+      return {
+        ...e,
+        expr: simplify(e.expr),
+        bounds: e.bounds.map((b) => ({ variable: b.variable, lo: simplify(b.lo), hi: simplify(b.hi) })),
+      };
   }
 }
 
@@ -153,6 +175,12 @@ export function mapChildren(e: Expr, f: (child: Expr) => Expr): Expr {
       return { ...e, expr: f(e.expr) };
     case "tuple":
       return { kind: "tuple", items: e.items.map(f) };
+    case "matrix":
+      return { kind: "matrix", rows: e.rows.map((row) => row.map(f)) };
+    case "integral":
+      return { ...e, expr: f(e.expr), region: e.region && f(e.region), bounds: e.bounds.map((b) => ({ variable: b.variable, lo: f(b.lo), hi: f(b.hi) })) };
+    case "reduce":
+      return { ...e, expr: f(e.expr), bounds: e.bounds.map((b) => ({ variable: b.variable, lo: f(b.lo), hi: f(b.hi) })) };
   }
 }
 
@@ -162,6 +190,30 @@ export function mapChildren(e: Expr, f: (child: Expr) => Expr): Expr {
  */
 export function substitute(e: Expr, bindings: ReadonlyMap<string, Expr>): Expr {
   if (e.kind === "var") return bindings.get(e.name) ?? e;
+  if (e.kind === "integral") {
+    // Every integration variable is bound throughout, bounds included.
+    const names = new Set(e.bounds.map((b) => b.variable));
+    const inner = new Map([...bindings].filter(([name]) => !names.has(name)));
+    return {
+      ...e,
+      expr: substitute(e.expr, inner),
+      region: e.region && substitute(e.region, inner),
+      bounds: e.bounds.map((b, k) => {
+        const outer = new Set(e.bounds.slice(k + 1).map((o) => o.variable));
+        const scope = new Map([...bindings].filter(([name]) => !outer.has(name)));
+        return { variable: b.variable, lo: substitute(b.lo, scope), hi: substitute(b.hi, scope) };
+      }),
+    };
+  }
+  if (e.kind === "reduce") {
+    // The variables a min or max ranges over are its own; outer bindings don't reach them.
+    const inner = new Map([...bindings].filter(([name]) => !e.bounds.some((b) => b.variable === name)));
+    return {
+      ...e,
+      expr: substitute(e.expr, inner),
+      bounds: e.bounds.map((b) => ({ variable: b.variable, lo: substitute(b.lo, bindings), hi: substitute(b.hi, bindings) })),
+    };
+  }
   return mapChildren(e, (child) => substitute(child, bindings));
 }
 
@@ -189,12 +241,25 @@ export function differentiate(e: Expr, v: string): Expr {
         case "/":
           return div(sub(mul(du, w), mul(u, dw)), pow(w, N(2)));
         case "^":
+        case ".^":
           return differentiatePower(u, w, du, dw);
+        case ".*":
+          return add(mul(du, w), mul(u, dw));
+        case "./":
+          return div(sub(mul(du, w), mul(u, dw)), pow(w, N(2)));
+        case "\\":
+          return differentiate({ kind: "binary", op: "/", left: w, right: u }, v);
       }
       return N(0);
     }
     case "call":
       return differentiateCall(e.name, e.args, v);
+    case "reduce":
+      return differentiateReduce(e, v);
+    case "integral":
+      return differentiateIntegral(e, v);
+    case "matrix":
+      throw new SymbolicError("Differentiate a matrix entry by entry");
     case "apply":
     case "deriv":
     case "tuple":
@@ -286,7 +351,7 @@ function precedenceOf(e: Expr): number {
       return PRECEDENCE.unary;
     case "binary":
       if (e.op === "+" || e.op === "-") return PRECEDENCE.add;
-      return e.op === "^" ? PRECEDENCE.pow : PRECEDENCE.mul;
+      return e.op === "^" || e.op === ".^" ? PRECEDENCE.pow : PRECEDENCE.mul;
     default:
       return PRECEDENCE.atom;
   }
@@ -335,7 +400,12 @@ export function formatExpr(e: Expr, options: FormatOptions = {}): string {
           case "/":
             return `${wrap(n.left, PRECEDENCE.mul)} / ${wrap(n.right, PRECEDENCE.mul + 1)}`;
           case "^":
-            return `${wrap(n.left, PRECEDENCE.atom)}^${wrap(n.right, PRECEDENCE.pow)}`;
+          case ".^":
+            return `${wrap(n.left, PRECEDENCE.atom)}${n.op}${wrap(n.right, PRECEDENCE.pow)}`;
+          case ".*":
+          case "./":
+          case "\\":
+            return `${wrap(n.left, PRECEDENCE.mul)} ${n.op} ${wrap(n.right, PRECEDENCE.mul + 1)}`;
         }
         return "?";
       case "call":
@@ -350,7 +420,61 @@ export function formatExpr(e: Expr, options: FormatOptions = {}): string {
       }
       case "tuple":
         return `(${n.items.map(go).join(", ")})`;
+      case "matrix":
+        return `[${n.rows.map((row) => row.map(go).join(", ")).join("; ")}]`;
+      case "integral": {
+        const bounds = n.bounds.map((b) => `${b.variable}, ${go(b.lo)}, ${go(b.hi)}`).join(", ");
+        return `int(${go(n.expr)}${n.region ? `, ${go(n.region)} < 0` : ""}, ${bounds})`;
+      }
+      case "reduce": {
+        const bounds = n.bounds.map((b) => `${b.variable}, ${go(b.lo)}, ${go(b.hi)}`).join(", ");
+        const text = `${n.op}(${go(n.expr)}, ${bounds})`;
+        return n.component === null ? text : `${text}(${n.component + 1})`;
+      }
     }
   };
   return go(e);
+}
+
+const dependsOn = (e: Expr, v: string): boolean => freeVars(e, new Set()).has(v);
+
+/**
+ * d/dv of a minimum or maximum over a range, by the envelope theorem: the
+ * derivative of the objective at the optimum, plus, when the range moves, the
+ * motion of whichever end the optimum sits on. At an interior optimum the slope
+ * along the variable is zero, so weighting the ends' motion by where the
+ * optimum lies costs nothing there and picks the right end at an edge.
+ */
+function differentiateReduce(e: Extract<Expr, { kind: "reduce" }>, v: string): Expr {
+  if (!dependsOn(e, v)) return N(0);
+  if (e.op === "argmin" || e.op === "argmax") throw new SymbolicError(`Can't differentiate ${e.op}`);
+  const where = e.op === "min" ? "argmin" : "argmax";
+  const optimum = new Map(
+    e.bounds.map((b, k): [string, Expr] => [b.variable, { kind: "reduce", op: where, expr: e.expr, bounds: e.bounds, component: e.bounds.length > 1 ? k : null }]),
+  );
+  let d = differentiate(e.expr, v);
+  for (const b of e.bounds) {
+    const dlo = simplify(differentiate(b.lo, v));
+    const dhi = simplify(differentiate(b.hi, v));
+    if (isValue(dlo, 0) && isValue(dhi, 0)) continue;
+    const position = div(sub({ kind: "var", name: b.variable }, b.lo), sub(b.hi, b.lo));
+    d = add(d, mul(differentiate(e.expr, b.variable), add(dlo, mul(sub(dhi, dlo), position))));
+  }
+  return substitute(simplify(d), optimum);
+}
+
+/** d/dv of an integral, by the Leibniz rule: moving ends, plus the derivative under the integral sign. */
+function differentiateIntegral(e: Extract<Expr, { kind: "integral" }>, v: string): Expr {
+  if (!dependsOn(e, v)) return N(0);
+  if (e.region && dependsOn(e.region, v)) throw new SymbolicError("Can't differentiate an integral whose region moves");
+  // When v is also an integration variable, the integrand's v is that one and doesn't move.
+  const under = e.bounds.some((b) => b.variable === v) ? N(0) : simplify(differentiate(e.expr, v));
+  const inside: Expr = isValue(under, 0) ? N(0) : { ...e, expr: under };
+  if (e.bounds.every((b) => !dependsOn(b.lo, v) && !dependsOn(b.hi, v))) return inside;
+  if (e.bounds.length > 1 || e.region) {
+    throw new SymbolicError("Can't differentiate an integral over several variables whose limits move");
+  }
+  const [b] = e.bounds as [(typeof e.bounds)[number]];
+  const at = (end: Expr): Expr => substitute(e.expr, new Map([[b.variable, end]]));
+  return add(sub(mul(at(b.hi), differentiate(b.hi, v)), mul(at(b.lo), differentiate(b.lo, v))), inside);
 }

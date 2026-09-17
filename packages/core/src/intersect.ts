@@ -166,6 +166,7 @@ function curveOf(plot: Plot2D, view: View): Curve | null {
       return sampledCurve(xs, ys, n + 1, view);
     }
     case "trajectory":
+    case "orbit":
       return sampledCurve(plot.h, plot.v, plot.h.length, view);
     default:
       return null;

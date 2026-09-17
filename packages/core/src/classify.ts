@@ -50,7 +50,7 @@ export function dimensionOf(graph: Graph): 2 | 3 {
  */
 export function classify(statement: Statement): Classified {
   const sides = statement.kind === "expr" ? [statement.expr] : [statement.left, statement.right];
-  if (sides.some((e) => someNode(e, (n) => n.kind === "apply" || n.kind === "deriv" || n.kind === "tuple"))) {
+  if (sides.some((e) => someNode(e, (n) => n.kind === "apply" || n.kind === "deriv" || n.kind === "tuple" || n.kind === "matrix" || n.kind === "reduce" || n.kind === "integral"))) {
     throw new ParseError("Functions, derivatives and parametric plots need the full document", 0, 0);
   }
   const graph = toGraph(statement);

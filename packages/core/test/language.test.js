@@ -88,7 +88,7 @@ test("tuples, points and function-style application", () => {
 test("bracket and axis mistakes report clearly", () => {
   assert.throws(() => parseEntry("y = x [0, 1, 2, 3]"), /separate axes with ;/);
   assert.throws(() => parseEntry("y = x [0, 1, p = 2]"), /separate brackets/);
-  assert.throws(() => parseEntry("y = x {x}"), /two or three axes/);
+  assert.throws(() => parseEntry("y = x {x}"), /two to four axes/);
   assert.throws(() => parseEntry("y = x {x, x}"), /listed twice/);
   assert.throws(() => parseEntry("y = x [0, 1] [2, 3]"), /one \[/);
   assert.throws(() => parseEntry("y = x []"), /Empty brackets/);

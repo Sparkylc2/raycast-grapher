@@ -9,7 +9,9 @@
 
 type ExtensionPreferences = {
   /** Animation Frame Rate - Upper limit on frames per second while the plot moves. Lower it if motion stutters. */
-  "frameRate": "15" | "30" | "45" | "60"
+  "frameRate": "15" | "30" | "45" | "60",
+  /** Function Calls - When on, a(x + 1) is an error unless a is a defined function, instead of meaning a times (x + 1). */
+  "strictCalls": boolean
 }
 
 /** Preferences accessible in all the extension's commands */

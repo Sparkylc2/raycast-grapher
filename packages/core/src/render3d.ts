@@ -111,6 +111,18 @@ export function renderScene3D(
   }
   for (const [p, q] of cubeEdges) drawLine3D(canvas, depth, project, p, q, grid, 0.6 * ratio, 0.55);
 
+  // The coordinate axes through the origin, across the box. When the origin lies
+  // outside the box they sit on the nearest face instead, so all three stay in view.
+  const origin = toCube(0, 0, 0).map((v) => Math.max(-1, Math.min(1, v))) as [number, number, number];
+  const axisColor = palette.axis;
+  for (let axis = 0; axis < 3; axis++) {
+    const from: [number, number, number] = [...origin];
+    const to: [number, number, number] = [...origin];
+    from[axis] = -1;
+    to[axis] = 1;
+    drawLine3D(canvas, depth, project, from, to, axisColor, 0.8 * ratio, 0.9);
+  }
+
   for (const line of scene.lines) {
     const color = hexToRgb(line.color);
     const pts = line.points;

@@ -67,7 +67,7 @@ var binary = (op, left, right) => ({
 });
 function freeVars(expr, constants) {
   const out = /* @__PURE__ */ new Set();
-  const add = (name) => {
+  const add2 = (name) => {
     if (!constants.has(name))
       out.add(name);
   };
@@ -76,7 +76,7 @@ function freeVars(expr, constants) {
       case "num":
         return;
       case "var":
-        add(n.name);
+        add2(n.name);
         return;
       case "unary":
         walk(n.arg);
@@ -90,19 +90,36 @@ function freeVars(expr, constants) {
           walk(a);
         return;
       case "apply":
-        add(n.name);
+        add2(n.name);
         for (const a of n.args)
           walk(a);
         return;
       case "deriv":
         walk(n.expr);
         if (n.variable)
-          add(n.variable);
+          add2(n.variable);
         return;
       case "tuple":
         for (const item of n.items)
           walk(item);
         return;
+      case "matrix":
+        for (const row of n.rows)
+          for (const item of row)
+            walk(item);
+        return;
+      case "reduce": {
+        const inner = freeVars(n.expr, constants);
+        for (const b of n.bounds)
+          inner.delete(b.variable);
+        for (const name of inner)
+          out.add(name);
+        for (const b of n.bounds) {
+          walk(b.lo);
+          walk(b.hi);
+        }
+        return;
+      }
     }
   };
   walk(expr);
@@ -126,6 +143,10 @@ function someNode(expr, test) {
       return someNode(expr.expr, test);
     case "tuple":
       return expr.items.some((i) => someNode(i, test));
+    case "matrix":
+      return expr.rows.some((row) => row.some((i) => someNode(i, test)));
+    case "reduce":
+      return someNode(expr.expr, test) || expr.bounds.some((b) => someNode(b.lo, test) || someNode(b.hi, test));
   }
 }
 
@@ -199,6 +220,11 @@ var ParseError = class extends Error {
   }
 };
 var OPERATORS = [
+  // MATLAB's elementwise operators and left division.
+  ".*",
+  "./",
+  ".^",
+  "\\",
   "<=",
   ">=",
   "==",
@@ -273,6 +299,11 @@ function tokenize(source) {
       });
       continue;
     }
+    if (c === "." && source[i + 1] === "'") {
+      tokens.push({ kind: "prime", text: ".'", start: i, end: i + 2 });
+      i += 2;
+      continue;
+    }
     const single = SINGLE[c];
     if (single) {
       tokens.push({ kind: single, text: c, start: i, end: ++i });
@@ -314,11 +345,16 @@ function tokenize(source) {
 
 // ../core/dist/parser.js
 var RELATION_OPS = /* @__PURE__ */ new Set(["=", "==", "<", ">", "<=", ">="]);
+var MULTIPLICATIVE = /* @__PURE__ */ new Set(["*", "/", ".*", "./", "\\"]);
+var REDUCTIONS = /* @__PURE__ */ new Set(["min", "max", "argmin", "argmax"]);
 var DIFFERENTIAL = /^[d∂]([A-Za-zͰ-Ͽ](?:_[A-Za-z0-9]+|[0-9]+)?)$/;
 var OPERATOR_D = /* @__PURE__ */ new Set(["d", "\u2202"]);
+var ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
 var Parser = class {
   tokens;
   pos = 0;
+  /** Whether the innermost open bracket is a matrix, where spaces separate entries. */
+  contexts = [];
   constructor(tokens) {
     this.tokens = tokens;
   }
@@ -337,6 +373,23 @@ var Parser = class {
     if (t.kind !== kind)
       throw new ParseError(message, t.start, t.end);
     return t;
+  }
+  inMatrix() {
+    return this.contexts[this.contexts.length - 1] === "matrix";
+  }
+  /** True when whitespace separates the token at `offset` from the one before it. */
+  gapBefore(offset = 0) {
+    const index = Math.min(this.pos + offset, this.tokens.length - 1);
+    const previous = this.tokens[index - 1];
+    return previous !== void 0 && this.tokens[index].start > previous.end;
+  }
+  within(context, body) {
+    this.contexts.push(context);
+    try {
+      return body();
+    } finally {
+      this.contexts.pop();
+    }
   }
   parseEntry() {
     const statement = this.parseStatement();
@@ -388,31 +441,33 @@ var Parser = class {
     }
     const rows = [];
     let row = [];
-    for (; ; ) {
-      const left = this.parseAdditive();
-      let right = null;
-      const t = this.peek();
-      if (t.kind === "op" && (t.text === "=" || t.text === "==")) {
-        this.next();
-        right = this.parseAdditive();
-      } else if (t.kind === "op" && RELATION_OPS.has(t.text)) {
-        throw new ParseError("Conditions use =", t.start, t.end);
+    this.within("group", () => {
+      for (; ; ) {
+        const left = this.parseAdditive();
+        let right = null;
+        const t = this.peek();
+        if (t.kind === "op" && (t.text === "=" || t.text === "==")) {
+          this.next();
+          right = this.parseAdditive();
+        } else if (t.kind === "op" && RELATION_OPS.has(t.text)) {
+          throw new ParseError("Conditions use =", t.start, t.end);
+        }
+        row.push({ left, right });
+        const sep = this.next();
+        if (sep.kind === "comma")
+          continue;
+        if (sep.kind === "semicolon") {
+          rows.push(row);
+          row = [];
+          continue;
+        }
+        if (sep.kind === "rbracket") {
+          rows.push(row);
+          break;
+        }
+        throw new ParseError("Expected , ; or ] here", sep.start, sep.end);
       }
-      row.push({ left, right });
-      const sep = this.next();
-      if (sep.kind === "comma")
-        continue;
-      if (sep.kind === "semicolon") {
-        rows.push(row);
-        row = [];
-        continue;
-      }
-      if (sep.kind === "rbracket") {
-        rows.push(row);
-        break;
-      }
-      throw new ParseError("Expected , ; or ] here", sep.start, sep.end);
-    }
+    });
     const items = rows.flat();
     const relations = items.filter((i) => i.right !== null).length;
     if (relations > 0 && relations < items.length) {
@@ -426,7 +481,8 @@ var Parser = class {
     }
     const intervals = rows.map((r) => {
       if (r.length !== 2 && r.length !== 3) {
-        throw new ParseError("A range is [low, high] or [low, high, step]; separate axes with ;", open.start, open.end);
+        const hint = r.length === 1 ? " To multiply by a matrix, put * before it." : "";
+        throw new ParseError(`A range is [low, high] or [low, high, step]; separate axes with ;.${hint}`, open.start, open.end);
       }
       return { lo: r[0].left, hi: r[1].left, step: r[2]?.left ?? null };
     });
@@ -458,6 +514,8 @@ var Parser = class {
   parseAdditive() {
     let left = this.parseMultiplicative();
     while (this.isOp("+") || this.isOp("-")) {
+      if (this.inMatrix() && this.gapBefore() && !this.gapBefore(1))
+        break;
       const op = this.next().text;
       const right = this.parseMultiplicative();
       left = { kind: "binary", op, left, right };
@@ -467,11 +525,12 @@ var Parser = class {
   parseMultiplicative() {
     let left = this.parseUnary();
     for (; ; ) {
-      if (this.isOp("*") || this.isOp("/")) {
+      const t = this.peek();
+      if (t.kind === "op" && MULTIPLICATIVE.has(t.text)) {
         const op = this.next().text;
         const right = this.parseUnary();
         left = { kind: "binary", op, left, right };
-      } else if (this.startsImplicitFactor()) {
+      } else if (this.startsImplicitFactor() && !(this.inMatrix() && this.gapBefore())) {
         const right = this.parseUnary();
         left = { kind: "binary", op: "*", left, right };
       } else {
@@ -497,11 +556,14 @@ var Parser = class {
     return this.parsePower();
   }
   parsePower() {
-    const base = this.parsePrimary();
-    if (this.isOp("^")) {
-      this.next();
+    let base = this.parsePrimary();
+    if (base.kind !== "var" && base.kind !== "deriv" && base.kind !== "apply" && this.peek().kind === "prime") {
+      base = { kind: "deriv", expr: base, variable: null, order: this.countPrimes() };
+    }
+    if (this.isOp("^") || this.isOp(".^")) {
+      const op = this.next().text;
       const exponent = this.parseUnary();
-      return { kind: "binary", op: "^", left: base, right: exponent };
+      return { kind: "binary", op, left: base, right: exponent };
     }
     return base;
   }
@@ -518,16 +580,70 @@ var Parser = class {
     if (this.peek().kind === "rparen") {
       throw new ParseError(`${name.text}() needs an argument`, name.start, this.peek().end);
     }
-    const args = [this.parseAdditive()];
-    while (this.peek().kind === "comma") {
-      this.next();
-      args.push(this.parseAdditive());
+    return this.within("group", () => {
+      const args = [this.parseAdditive()];
+      while (this.peek().kind === "comma") {
+        this.next();
+        args.push(this.parseAdditive());
+      }
+      const close = this.next();
+      if (close.kind !== "rparen") {
+        throw new ParseError(`Missing closing bracket for ${name.text}`, open.start, close.end);
+      }
+      return args;
+    });
+  }
+  parseMatrix(open) {
+    return this.within("matrix", () => {
+      if (this.peek().kind === "rbracket")
+        throw new ParseError("Empty matrix", open.start, this.peek().end);
+      const rows = [[]];
+      for (; ; ) {
+        rows[rows.length - 1].push(this.parseAdditive());
+        const t = this.peek();
+        if (t.kind === "comma") {
+          this.next();
+          continue;
+        }
+        if (t.kind === "semicolon") {
+          this.next();
+          rows.push([]);
+          continue;
+        }
+        if (t.kind === "rbracket") {
+          this.next();
+          break;
+        }
+        const startsEntry = t.kind === "number" || t.kind === "ident" || t.kind === "lparen" || t.kind === "lbracket" || t.kind === "op" && (t.text === "-" || t.text === "+");
+        if (startsEntry && this.gapBefore())
+          continue;
+        throw new ParseError(t.kind === "eof" ? "Missing ] to close the matrix" : "Expected , ; or ] in a matrix", t.start, t.end);
+      }
+      if (rows.length > 1 && rows[rows.length - 1].length === 0)
+        rows.pop();
+      if (rows.some((row) => row.length === 0))
+        throw new ParseError("A matrix row is empty", open.start, open.end);
+      return { kind: "matrix", rows };
+    });
+  }
+  reduction(name, op, args) {
+    const usage = `${op} over a range takes an expression, then a name, low and high for each variable, like ${op}(f(x), x, -2, 2)`;
+    if (args.length < 4 || (args.length - 1) % 3 !== 0)
+      throw new ParseError(usage, name.start, name.end);
+    const bounds = [];
+    for (let i = 1; i < args.length; i += 3) {
+      const v = args[i];
+      if (v.kind !== "var") {
+        throw new ParseError(`The ${ORDINALS[i] ?? `${i + 1}th`} argument of ${op} should be a variable name. ${usage}`, name.start, name.end);
+      }
+      if (bounds.some((b) => b.variable === v.name)) {
+        throw new ParseError(`${v.name} appears twice in ${op}`, name.start, name.end);
+      }
+      bounds.push({ variable: v.name, lo: args[i + 1], hi: args[i + 2] });
     }
-    const close = this.next();
-    if (close.kind !== "rparen") {
-      throw new ParseError(`Missing closing bracket for ${name.text}`, open.start, close.end);
-    }
-    return args;
+    if (bounds.length > 3)
+      throw new ParseError(`${op} works over at most three variables`, name.start, name.end);
+    return { kind: "reduce", op, expr: args[0], bounds, component: null };
   }
   parsePrimary() {
     const t = this.next();
@@ -538,26 +654,30 @@ var Parser = class {
       }
       return { kind: "num", value };
     }
+    if (t.kind === "lbracket")
+      return this.parseMatrix(t);
     if (t.kind === "lparen") {
-      const first = this.parseAdditive();
-      if (this.peek().kind === "comma") {
-        const items = [first];
-        while (this.peek().kind === "comma") {
-          this.next();
-          items.push(this.parseAdditive());
+      return this.within("group", () => {
+        const first = this.parseAdditive();
+        if (this.peek().kind === "comma") {
+          const items = [first];
+          while (this.peek().kind === "comma") {
+            this.next();
+            items.push(this.parseAdditive());
+          }
+          const close2 = this.next();
+          if (close2.kind !== "rparen")
+            throw new ParseError("Missing closing bracket", t.start, close2.end);
+          if (items.length > 3) {
+            throw new ParseError("Points and parametric plots have 2 or 3 coordinates", t.start, close2.end);
+          }
+          return { kind: "tuple", items };
         }
-        const close2 = this.next();
-        if (close2.kind !== "rparen")
-          throw new ParseError("Missing closing bracket", t.start, close2.end);
-        if (items.length > 3) {
-          throw new ParseError("Points and parametric plots have 2 or 3 coordinates", t.start, close2.end);
-        }
-        return { kind: "tuple", items };
-      }
-      const close = this.next();
-      if (close.kind !== "rparen")
-        throw new ParseError("Missing closing bracket", t.start, close.end);
-      return first;
+        const close = this.next();
+        if (close.kind !== "rparen")
+          throw new ParseError("Missing closing bracket", t.start, close.end);
+        return first;
+      });
     }
     if (t.kind === "ident") {
       const leibniz = this.parseLeibniz(t);
@@ -565,6 +685,12 @@ var Parser = class {
         return leibniz;
       const name = t.text;
       const primes = this.countPrimes();
+      if (REDUCTIONS.has(name) && primes === 0 && this.peek().kind === "lparen") {
+        const args = this.parseArgs(t);
+        if ((name === "min" || name === "max") && args.length === 2)
+          return { kind: "call", name, args };
+        return this.reduction(t, name, args);
+      }
       const fn = FUNCTIONS[name];
       if (fn) {
         let args;
@@ -585,7 +711,7 @@ var Parser = class {
       const constant = CONSTANTS[name];
       if (constant !== void 0 && primes === 0)
         return { kind: "num", value: constant };
-      if (this.peek().kind === "lparen") {
+      if (this.peek().kind === "lparen" && !(this.inMatrix() && this.gapBefore())) {
         return { kind: "apply", name, args: this.parseArgs(t), primes };
       }
       if (primes > 0) {
@@ -684,7 +810,7 @@ function dimensionOf(graph) {
 }
 function classify(statement) {
   const sides = statement.kind === "expr" ? [statement.expr] : [statement.left, statement.right];
-  if (sides.some((e) => someNode(e, (n) => n.kind === "apply" || n.kind === "deriv" || n.kind === "tuple"))) {
+  if (sides.some((e) => someNode(e, (n) => n.kind === "apply" || n.kind === "deriv" || n.kind === "tuple" || n.kind === "matrix" || n.kind === "reduce"))) {
     throw new ParseError("Functions, derivatives and parametric plots need the full document", 0, 0);
   }
   const graph = toGraph(statement);
@@ -780,7 +906,11 @@ function toGlslSource(expr, options = {}) {
       case "binary": {
         const l = go(n.left);
         const r = go(n.right);
-        return n.op === "^" ? `gr_pow(${l}, ${r})` : `(${l} ${n.op} ${r})`;
+        if (n.op === "^" || n.op === ".^")
+          return `gr_pow(${l}, ${r})`;
+        if (n.op === "\\")
+          return `(${r} / ${l})`;
+        return `(${l} ${n.op === ".*" ? "*" : n.op === "./" ? "/" : n.op} ${r})`;
       }
       case "call": {
         const args = n.args.map(go);
@@ -796,7 +926,9 @@ function toGlslSource(expr, options = {}) {
       case "apply":
       case "deriv":
       case "tuple":
-        throw new Error("Resolve functions, derivatives and tuples before compiling to GLSL");
+      case "matrix":
+      case "reduce":
+        throw new Error("Resolve functions, derivatives, matrices and ranges before compiling to GLSL");
     }
   };
   return go(expr);
@@ -862,7 +994,7 @@ function parseScene(raw) {
   return {
     version: 1,
     mode: d.mode === "3d" ? "3d" : "2d",
-    expressions: Array.isArray(d.expressions) ? d.expressions.filter(isExpressionEntry) : base.expressions,
+    expressions: Array.isArray(d.expressions) ? d.expressions.filter(isExpressionEntry).map(withValidColor) : base.expressions,
     camera2d: { ...base.camera2d, ...d.camera2d ?? {} },
     camera3d: { ...base.camera3d, ...d.camera3d ?? {} },
     parameters: typeof d.parameters === "object" && d.parameters !== null ? d.parameters : {}
@@ -873,6 +1005,13 @@ function isExpressionEntry(value) {
     return false;
   const e = value;
   return typeof e.id === "string" && typeof e.source === "string";
+}
+function withValidColor(entry) {
+  const chosen = entry.colorIndex;
+  if (chosen === void 0 || Number.isInteger(chosen) && chosen >= 0 && chosen < SERIES_COLORS.length)
+    return entry;
+  const { colorIndex: _dropped, ...rest } = entry;
+  return rest;
 }
 
 // ../core/dist/font.js

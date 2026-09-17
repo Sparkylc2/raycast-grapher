@@ -25,5 +25,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ml-matrix": "^6.15.0"
   }
 }

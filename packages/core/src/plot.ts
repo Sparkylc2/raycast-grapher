@@ -38,6 +38,35 @@ export type Plot2D =
       readonly range: Range;
     }
   | { readonly kind: "point"; readonly color: string; readonly x: number; readonly y: number }
+  /** A vector drawn from (x0, y0) to (x1, y1). */
+  | {
+      readonly kind: "arrow";
+      readonly color: string;
+      readonly x0: number;
+      readonly y0: number;
+      readonly x1: number;
+      readonly y1: number;
+    }
+  /** Direction arrows of a planar system: the rate (dh, dv) at (h, v), into `out`. */
+  | {
+      readonly kind: "vectors";
+      readonly color: string;
+      readonly field: (h: number, v: number, out: number[]) => void;
+      readonly clipH: Range | null;
+      readonly clipV: Range | null;
+    }
+  /** A state-space trajectory sampled in time; playback reveals it up to the playhead. */
+  | {
+      readonly kind: "orbit";
+      readonly color: string;
+      readonly h: Float64Array;
+      readonly v: Float64Array;
+      readonly t: Float64Array;
+      readonly h0: number;
+      readonly v0: number;
+    }
+  /** A point where a system rests: filled when stable, hollow when not. */
+  | { readonly kind: "equilibrium"; readonly color: string; readonly x: number; readonly y: number; readonly stable: boolean }
   /** Direction field of a first-order equation: every real slope at (h, v), into `out`. */
   | {
       readonly kind: "slopes";
@@ -106,6 +135,8 @@ export type Surface3D =
       readonly range: Range;
     }
   | { readonly kind: "point3d"; readonly color: string; readonly x: number; readonly y: number; readonly z: number }
+  /** A vector from the origin. */
+  | { readonly kind: "arrow3d"; readonly color: string; readonly x: number; readonly y: number; readonly z: number }
   /** Heights on a regular grid over x and y, as a PDE solution u(x, t) provides. */
   | {
       readonly kind: "gridSurface";

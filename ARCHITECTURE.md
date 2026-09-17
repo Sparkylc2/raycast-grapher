@@ -17,13 +17,20 @@ panel.
 | Images in `Detail` markdown, from an absolute path | Yes |
 | Monospace text, inside a fenced code block | Yes |
 | LaTeX in `Detail` markdown | Yes |
+| Up and down arrows with any modifier, which the list keeps for itself | No |
+| Keeping Backspace on an empty search bar from closing the command | No |
 | Pointer position, drag, scroll wheel, hover | No |
 | Fonts, colors, CSS, or any styling control | No |
 | Canvas or webview | No |
 
 There is no pointer API of any kind, so panning by drag cannot be approximated;
-the closest equivalent is a modifier plus arrow keys nudging the camera and
-re-rendering. Images do work, which makes a real rasterised preview possible,
+the closest equivalent is keyboard shortcuts nudging the camera and
+re-rendering. Movement uses Cmd+Shift with N, E, I and O. Arrows are out because the list
+consumes the vertical ones before any action shortcut sees them. Option is out
+because Option+N, E and I are dead keys, and Raycast's shortcut matcher skips
+any keypress that is composing a character.
+Raycast's search field calls its router's back on Backspace when empty, before
+the extension is involved, so that exit cannot be disabled from an extension. Images do work, which makes a real rasterised preview possible,
 but Raycast caches them by filename, so each frame needs a fresh name.
 
 So the project is two surfaces over one engine:
@@ -92,9 +99,166 @@ fold constants and drop zero and unit terms as the result is built. `f'(x)`,
 derivative plots as exactly as the function does, at any zoom. A test checks
 every built-in against finite differences.
 
+Derivatives of unknown functions go through a total derivative. Each unknown
+and each of its derivatives is swapped for a placeholder name, the expression
+is differentiated as usual, and every placeholder adds its chain-rule term. So
+`d/dx(y^2)` becomes `2y y'`, `d/dx(d/dx(y))` becomes `y''`, and
+`d/dx(x^2 + y^2) = 0` becomes the circle's differential equation. The unknowns
+are names written with derivative notation or given conditions, plus the
+vertical axis in a 2D line. Other names stay constant, 3D lines keep every
+derivative partial, and function bodies are always differentiated partially.
+Subscripts such as `u_x` are converted before resolving, so a PDE term like
+`d/dx((1 + x^2) u_x)` gets the product rule too.
+
 The same machinery answers a question the solvers need: whether an equation is
 linear in its highest derivative. It is when the second derivative with respect
 to that derivative simplifies to zero.
+
+## Matrices as grids of expressions
+
+A matrix never reaches a compiler. While a line resolves, `document.ts` turns
+every value into either an ordinary expression or a `MatrixValue` from
+`linalg.ts`, a grid of expressions, and does the matrix arithmetic there,
+entry by entry. `A * v` becomes two expressions before anything is compiled, so
+an entry can depend on a slider or on x, the derivative code keeps working on
+plain numbers, and a 2-vector with a free variable is simply a parametric
+curve. A 1×1 matrix counts as a number, as in MATLAB.
+
+Everything with a closed form stays symbolic: products, transposes, cofactor
+determinants, adjugate inverses up to 3×3, and integer powers by repeated
+squaring. What has none, eigenvalues, the matrix exponential, the spectral norm
+and larger inverses, goes to ml-matrix and needs entries that are fixed
+numbers. A constant is a matrix only if its right side resolves to one, which
+is worked out lazily, cached, and guarded against cycles.
+
+The parser keeps a stack of open brackets so that spaces separate entries only
+directly inside a matrix: `[1 -2]` is two entries, `[1 - 2]` one, and
+`f(1 -2)` a single argument. Primes after a name or bracket become derivatives,
+and a derivative of a matrix is read as a transpose. `B = A'` is a definition
+only once A is known to be a constant, so definitions with primes are collected
+in a second round.
+
+## Hints and tab stops
+
+`hints.ts` works out, from the text alone, what is being written and what can
+follow it. Raycast lets an extension replace the search text but not move the
+cursor, so a tab stop is always the end of the text: Tab appends the next piece
+(`d/dx(`, `, `, `] [y(0) = `) and the hint shows the rest, with values to type
+between ‹ and ›.
+
+Nothing is remembered between keystrokes. The lexer's tokens are scanned for
+open brackets, using the parser's rule that a bracket after a finished value is
+a range or conditions and anything else is a matrix. An open parenthesis shows
+its function's arguments; a trailing word completes to a function name or, for
+`ddx`, a derivative operator; and an open or missing range or condition bracket
+follows a template chosen by the kind of line. The kind comes from analysing
+the statement before any trailing brackets as a line of the document. That
+analysis keeps a differential equation's shape, its unknown, variables and
+order, even when the line has an error such as a missing starting value, since
+that is exactly when the hint is needed. Templates reuse typed values, so a PDE
+on `[0, pi; 0, 1]` offers `u(pi, t) = ` for its right edge.
+
+## Minimum and maximum over a range
+
+`min(expr, x, lo, hi)` is a `reduce` node. The variables it ranges over are
+bound inside it, so they are neither plot axes nor sliders. The compiler turns
+each one into a call to a closure in an array passed alongside the generated
+function; the closure evaluates the bounds for the current outer values, then
+optimises the inner compiled function over the box with `optimize.ts`.
+
+Global minimisation has no guarantee, so the search looks everywhere coarsely
+before refining: 160 samples and Brent's method for one variable, and for two
+or three a grid, Nelder–Mead from the best few distinct cells, and Brent along
+each axis to polish. Box edges are sampled, so extremes on the boundary count.
+The last result is cached per call site, so the coordinates of a
+multi-variable argmin share one search. Samples next to each other in a plot
+rarely move the optimum far, so later searches look coarsely and refine from
+the previous optimum as well, which cuts the cost several times over.
+
+Their derivatives come from the envelope theorem: the objective's derivative at
+the optimum, plus the motion of whichever end of the range the optimum sits
+on. The ends' motion is weighted by where the optimum lies, which is exact at
+an edge and harmless inside, where the slope along the variable is zero.
+
+## Integrals
+
+`int(expr, x, lo, hi, ...)` is an `integral` node with bounds innermost first.
+Like a reduction it compiles to a closure beside the generated function, which
+integrates level by level from the outside in, evaluating each level's bounds
+with the outer variables already fixed.
+
+`integrate.ts` does one dimension at a time: adaptive Gauss–Kronrod 7–15,
+splitting the interval with the largest error estimate. Infinite ranges are
+mapped onto finite ones, and when the error won't come down, as with an
+integrable singularity at an end, tanh-sinh takes over. Nested levels get
+looser tolerances and interval budgets, since their cost multiplies. A region
+restricts the innermost level: its boundary's crossings along that line are
+found by sampling and the Illinois method, and only the pieces inside are
+integrated, so the edge never falls inside a quadrature interval.
+
+Derivatives of integrals follow the Leibniz rule symbolically: the integrand at
+each moving end times that end's derivative, plus the integral of the partial
+derivative, which is dropped when it simplifies to zero.
+
+## State spaces
+
+A line like `X' = [X(2); -sin(X(1))]` or `X' = A * X` is a first-order system
+in a vector unknown. `document.ts` recognises it before anything else: the left
+side is the first derivative of an undefined name, and the right side indexes
+that name, is a matrix, or has a starting vector. The unknown is then bound to a
+column of placeholder names, one per component, and the right side resolves to
+one rate per component through the ordinary matrix machinery. The size comes
+from a starting vector, the axes, or the first size the right side accepts.
+
+`state-space.ts` integrates each starting vector backward and forward with RK4
+and finds equilibria of autonomous systems by Newton's method from a grid of
+starts, using the exact Jacobian the symbolic engine provides; its eigenvalues
+decide stability. Two components draw as a phase plane with direction arrows,
+nullclines and, for a linear system through the origin, its eigenvector lines.
+Three draw in 3D, where playback cuts each orbit at the playhead, and more draw
+each component against time.
+
+## PDEs on grids
+
+`field.ts` solves time-dependent PDEs on a box in one to three space dimensions
+by the method of lines: central differences for first, second and mixed
+derivatives on a uniform grid, and RK4 in time, with the highest time
+derivative found at every node as in the 1D solver. Faces are Dirichlet,
+Neumann or periodic; a Dirichlet face pins its nodes and a Neumann face
+supplies a ghost value by reflection. The stable step comes from probing how
+strongly the highest time derivative responds to each slot, and the grid
+shrinks until the step count fits a fixed budget of node evaluations, which
+keeps a 3D heat equation near a second. Frames are stored evenly in time.
+
+`lap(u)` expands while resolving into second derivatives over the line's space
+variables, from its axes or starting condition. One-dimensional lines keep the
+original solver unless they use `periodic` or `on boundary`, in which case the
+grid solver's output is shaped like the 1D solver's so it shows and plays the
+same way. Two dimensions show as a heatmap or, with the dependent variable in
+the axes, a height surface; three show as an isosurface, sampled trilinearly
+from the current frame.
+
+## Complex numbers
+
+Complex values follow the matrix approach: while a line resolves, a complex
+value is a pair of real expressions, and arithmetic, whole powers, `exp`, `ln`
+and the trig functions are expanded into real and imaginary parts by formula
+in `complex.ts`. Nothing after resolution knows about them. A value whose
+imaginary part simplifies to zero is real again, so `re(exp(i x))` is simply
+`cos(x)`. A complex number draws as a point on axes Re and Im, a complex value
+of one parameter as a curve, and a complex equation as its real and imaginary
+parts together, reusing the matrix-equation path.
+
+## Transformations
+
+A line whose value is a product of numeric 2×2 or 3×3 matrices, optionally
+ending in a vector, carries its factors as steps, rightmost first.
+`transform.ts` interpolates each step through its polar decomposition,
+M = R D S: the rotation's angle grows, the symmetric stretch blends from the
+identity, and a reflection D scales one axis through zero, so the plane folds
+flat halfway instead of shrinking through a point. The frame itself is ordinary
+plots: grid lines as parametric curves, the unit square as a region found by
+mapping each pixel back, and the basis and vectors as arrows.
 
 ## Differential equations
 

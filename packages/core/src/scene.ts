@@ -21,8 +21,11 @@ export interface Scene {
 export interface ExpressionEntry {
   readonly id: string;
   readonly source: string;
+  /** The automatic colour, given when the line was added. */
   readonly color: string;
   readonly visible: boolean;
+  /** A colour chosen by hand, as a position in the series; absent means automatic. */
+  readonly colorIndex?: number;
 }
 
 /** Kept as a named export for convenience; the theme owns the actual values. */
@@ -43,6 +46,12 @@ export function nextColor(count: number): string {
   return seriesColor(DEFAULT_THEME, count);
 }
 
+/** The colour a line draws in: the one chosen by hand, or its automatic one. */
+export function lineColor(entry: ExpressionEntry): string {
+  const chosen = entry.colorIndex;
+  return chosen !== undefined && SERIES_COLORS[chosen] ? SERIES_COLORS[chosen]! : entry.color;
+}
+
 /** Tolerant reader: an older or hand-edited file degrades to defaults, never throws. */
 export function parseScene(raw: string): Scene {
   const base = emptyScene();
@@ -59,7 +68,7 @@ export function parseScene(raw: string): Scene {
     version: 1,
     mode: d.mode === "3d" ? "3d" : "2d",
     expressions: Array.isArray(d.expressions)
-      ? d.expressions.filter(isExpressionEntry)
+      ? d.expressions.filter(isExpressionEntry).map(withValidColor)
       : base.expressions,
     camera2d: { ...base.camera2d, ...(d.camera2d ?? {}) },
     camera3d: { ...base.camera3d, ...(d.camera3d ?? {}) },
@@ -71,4 +80,11 @@ function isExpressionEntry(value: unknown): value is ExpressionEntry {
   if (typeof value !== "object" || value === null) return false;
   const e = value as Partial<ExpressionEntry>;
   return typeof e.id === "string" && typeof e.source === "string";
+}
+
+function withValidColor(entry: ExpressionEntry): ExpressionEntry {
+  const chosen = entry.colorIndex;
+  if (chosen === undefined || (Number.isInteger(chosen) && chosen >= 0 && chosen < SERIES_COLORS.length)) return entry;
+  const { colorIndex: _dropped, ...rest } = entry;
+  return rest;
 }
