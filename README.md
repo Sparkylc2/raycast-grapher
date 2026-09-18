@@ -15,6 +15,7 @@ defined anywhere can be used everywhere.
 | `x^2 + y^2 = 9` | implicit curve |
 | `y < x^2 - 2` | shaded region |
 | `a = 2 [0, 10, 0.5]` | slider from 0 to 10 in steps of 0.5 |
+| `a = 2 [0.1]` | slider stepping by 0.1 over the default range |
 | `f(x) = x^3 - a x` | function; a function of x also plots itself |
 | `f(x, y) = x^2 - y^2` | a function of x and y plots itself as the surface z = f(x, y) |
 | `y = f'(x)` or `y = d/dx sin(x^2)` | exact derivative |
@@ -56,7 +57,7 @@ defined anywhere can be used everywhere.
 | `exp(i t)` | a complex function of one variable is a curve in the complex plane |
 | `z = abs((x + i y)^2 - 1)` | real functions of complex values plot as usual |
 
-- **Sliders.** A name nothing defines evaluates as 1, and becomes a slider line when you add the equation.
+- **Sliders.** A name nothing defines evaluates as 1, and becomes a slider line when you add the equation. The sliders a line reads are drawn on its plot, up to four; click or drag one to set it. In the list, press on a slider row and drag sideways to set it. Settings can hide the plot's sliders, and its intersections.
 - **Derivatives of unknowns.** Inside a derivative, y depends on x in a 2D line, as does any name written with derivative notation or given conditions, so the chain rule applies: `d/dx(y^2)` is `2y y'`. Everything else is held constant, and in 3D lines every derivative is partial.
 - **Strict calls.** The Function Calls preference makes `a(x + 1)` an error unless `a` is a defined function.
 - **Time.** In a differential equation, the variable you differentiate by is time and sits on the horizontal axis.
@@ -90,8 +91,8 @@ defined anywhere can be used everywhere.
 | Cmd + Shift + Space | Play a solution over time, or a transformation's steps, or pause |
 | Cmd + Shift + P | Show the whole solution, or the final transformation |
 | Cmd + / | Show or hide the key help under the plot |
-| Cmd + 1 to Cmd + 7 | Colour the typed, edited or selected line |
-| Cmd + 0 | Back to its automatic colour |
+| Ctrl + 1 to Ctrl + 7 | Colour the typed, edited or selected line |
+| Ctrl + 0 | Back to its automatic colour |
 
 While you type, the row and the window title show what can come next, with
 values to fill in between ‹ and ›. Raycast hides the search bar's placeholder as

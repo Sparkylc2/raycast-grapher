@@ -93,7 +93,8 @@ _ = NSEvent.addGlobalMonitorForEvents(matching: watched) { event in
     dragging = true
     emit("drag", ["dx": event.deltaX, "dy": event.deltaY])
   case .leftMouseUp:
-    if pressedAt != nil && !dragging { emit("click") }
+    // A drag's end matters too: it lets go of a slider.
+    if pressedAt != nil { emit(dragging ? "up" : "click") }
     pressedAt = nil
     dragging = false
   case .scrollWheel:

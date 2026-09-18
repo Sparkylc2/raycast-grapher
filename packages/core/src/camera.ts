@@ -31,9 +31,14 @@ export const DEFAULT_CAMERA_3D: Camera3D = {
 };
 
 const PITCH_LIMIT = Math.PI / 2 - 1e-3;
-const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+const clamp = (v: number, lo: number, hi: number): number =>
+  Math.min(hi, Math.max(lo, v));
 
-export function panBy(camera: Camera2D, dxWorld: number, dyWorld: number): Camera2D {
+export function panBy(
+  camera: Camera2D,
+  dxWorld: number,
+  dyWorld: number,
+): Camera2D {
   return { ...camera, cx: camera.cx - dxWorld, cy: camera.cy - dyWorld };
 }
 
@@ -71,7 +76,11 @@ export function bounds2D(
   };
 }
 
-export function orbitBy(camera: Camera3D, dYaw: number, dPitch: number): Camera3D {
+export function orbitBy(
+  camera: Camera3D,
+  dYaw: number,
+  dPitch: number,
+): Camera3D {
   return {
     ...camera,
     yaw: camera.yaw + dYaw,

@@ -29,3 +29,4 @@ export * from "./state-space.js";
 export * from "./field.js";
 export * from "./complex.js";
 export * from "./pick.js";
+export * from "./sliders.js";

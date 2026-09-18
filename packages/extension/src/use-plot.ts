@@ -6,11 +6,13 @@ import {
   type Intersection,
   type Plot2D,
   type Scene3D,
+  type SliderGlyph,
   type Surface3D,
   type Typeface,
   KANAGAWA_DRAGON,
   KANAGAWA_LOTUS,
   buildScene3D,
+  drawSliders,
   findIntersections,
   renderPlots,
   renderScene3D,
@@ -53,6 +55,8 @@ export interface PlotInput {
   readonly highlight: number | null;
   /** Look for crossings once the view settles; off where lines cross by design, as on a grid. */
   readonly findCrossings?: boolean;
+  /** Sliders drawn over the plot, where the pointer can grab them. */
+  readonly sliders?: readonly SliderGlyph[];
 }
 
 export interface PlotState {
@@ -107,6 +111,7 @@ export function usePlot(input: PlotInput): PlotState {
     playhead: input.playhead,
     highlight: input.highlight,
     crossings: input.findCrossings ?? true,
+    sliders: input.sliders ?? [],
     axes: input.axisNames,
     fontReady,
     frameRate,
@@ -116,6 +121,7 @@ export function usePlot(input: PlotInput): PlotState {
   useEffect(() => {
     const { dimension, plots, surfaces, contentKey, playhead, highlight, axisNames } = input;
     const findCrossings = input.findCrossings ?? true;
+    const sliderGlyphs = input.sliders ?? [];
     const target2d = input.camera;
     const target3d = input.orbit;
     if (shownEpoch.current !== input.epoch) {
@@ -127,8 +133,9 @@ export function usePlot(input: PlotInput): PlotState {
     const theme = environment.appearance === "light" ? KANAGAWA_LOTUS : KANAGAWA_DRAGON;
     const face = typeface.current;
     const crossingKey = `${contentKey}|${JSON.stringify(target2d)}`;
+    // With crossings off, points found earlier for this same view aren't shown either.
     const cachedCrossings = (): Intersection[] =>
-      crossings.current?.key === crossingKey ? crossings.current.points : [];
+      findCrossings && crossings.current?.key === crossingKey ? crossings.current.points : [];
 
     const sceneFor = (quality: "draft" | "fine"): Scene3D => {
       const sceneKey = `${contentKey}|${quality}`;
@@ -169,6 +176,7 @@ export function usePlot(input: PlotInput): PlotState {
           playhead,
         });
       }
+      if (sliderGlyphs.length > 0) rgba = drawSliders(rgba, width, height, ratio, sliderGlyphs, theme, face ?? undefined);
       // Drafts live for a few dozen milliseconds, so they take the fast compression level.
       const png = encodePng(rgba, width, height, { level: ratio === 1 ? 1 : 6 });
       if (ratio === 1) motion.renders.push(performance.now() - started);

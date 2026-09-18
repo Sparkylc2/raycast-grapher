@@ -62,6 +62,24 @@
       "type": "checkbox",
       "required": false,
       "default": false
+    },
+    {
+      "name": "hideIntersections",
+      "title": "Intersections",
+      "label": "Hide intersections",
+      "description": "Don't look for or mark the crossings between curves.",
+      "type": "checkbox",
+      "required": false,
+      "default": false
+    },
+    {
+      "name": "slidersOnPlot",
+      "title": "Sliders",
+      "label": "Draw sliders on the plot",
+      "description": "Show the sliders the selected line reads in the plot's corner, where the pointer can drag them.",
+      "type": "checkbox",
+      "required": false,
+      "default": true
     }
   ],
   "dependencies": {

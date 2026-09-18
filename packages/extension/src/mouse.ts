@@ -27,6 +27,7 @@ interface Located {
 export type PointerEvent =
   | (Located & { readonly type: "drag"; readonly dx: number; readonly dy: number })
   | (Located & { readonly type: "click" })
+  | (Located & { readonly type: "up" })
   | (Located & { readonly type: "scroll"; readonly dx: number; readonly dy: number; readonly precise: boolean; readonly zooming: boolean })
   | (Located & { readonly type: "pinch"; readonly amount: number });
 
@@ -41,7 +42,7 @@ export interface PlotRect {
 /** A guess for Raycast's default layout, until Calibrate Mouse measures it. */
 export const DEFAULT_PLOT_RECT: PlotRect = { left: 0.41, top: 0.15, width: 0.57, height: 0.67 };
 
-const TYPES = new Set(["drag", "click", "scroll", "pinch"]);
+const TYPES = new Set(["drag", "click", "up", "scroll", "pinch"]);
 
 export function parsePointerLine(line: string): PointerEvent | null {
   try {

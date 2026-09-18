@@ -60,8 +60,9 @@ export type Statement =
   | { kind: "relation"; op: RelationOp; left: Expr; right: Expr };
 
 export interface IntervalAst {
-  readonly lo: Expr;
-  readonly hi: Expr;
+  /** Null for the step shorthand `[0.1]`, which sets only a slider's step. */
+  readonly lo: Expr | null;
+  readonly hi: Expr | null;
   readonly step: Expr | null;
 }
 

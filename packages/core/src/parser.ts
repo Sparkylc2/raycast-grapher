@@ -185,6 +185,10 @@ class Parser {
       };
     }
 
+    // A lone value is the step shorthand, as in a = 2 [0.1].
+    if (rows.length === 1 && rows[0]!.length === 1) {
+      return { kind: "intervals", intervals: [{ lo: null, hi: null, step: rows[0]![0]!.left }] };
+    }
     const intervals = rows.map((r): IntervalAst => {
       if (r.length !== 2 && r.length !== 3) {
         // A bracket after a finished statement is a range, so a matrix there needs an operator.

@@ -10,6 +10,7 @@ import {
   type Plot2D,
   type Range,
   type Scene,
+  type SliderGlyph,
   type SliderInfo,
   DEFAULT_ORBIT,
   KANAGAWA_DRAGON,
@@ -31,7 +32,10 @@ import {
   panBy,
   pickPlot,
   profileAt,
+  rewriteSliderValue,
   setSliderValue,
+  sliderTracks,
+  snapSliderValue,
   stepSlider,
   transformPlots,
   transformSurfaces,
@@ -55,6 +59,8 @@ const PLAYBACK_MS = 4000;
 /** Time for one matrix to finish moving the plane. */
 const STEP_SECONDS = 1.2;
 const SLIDER_TRACK = 10;
+/** About how wide a slider's track is in the list, in points: dragging that far spans its range. */
+const LIST_TRACK_POINTS = 110;
 
 /**
  * Keys under the plot. Movement is Cmd+Shift with N E I O, left, down, up and
@@ -66,7 +72,7 @@ const HELP = [
   "`↵` add or save  ·  `⇥` complete  ·  `⌘⌫` delete line  ·  `⌘⇧H` hide line  ·  `⌘/` hide this help",
   "`⌘⇧N` `⌘⇧E` `⌘⇧I` `⌘⇧O` move, or rotate in 3D  ·  `⌥=` `⌥-` zoom  ·  `⌥F` fit  ·  `⌥0` reset",
   "`⌘]` `⌘[` step slider  ·  `⌘⇧]` `⌘⇧[` switch slider  ·  `⌘U` `⌘L` intersections or matrix steps  ·  `⌘⇧Space` play",
-  "`⌘1` to `⌘7` colour  ·  `⌘0` automatic colour",
+  "`⌃1` to `⌃7` colour  ·  `⌃0` automatic colour  ·  drag the sliders on the plot",
 ].join("  \n");
 
 /**
@@ -95,6 +101,10 @@ export default function Command(props: { arguments?: { expression?: string } }) 
   const [clicked, setClicked] = useState<{ x: number; y: number } | null>(null);
   const [calibration, setCalibration] = useState<{ step: 1 } | { step: 2; left: number; top: number } | null>(null);
   const [plotRect, setPlotRect] = useCachedState<PlotRect>("mouse-plot-rect", DEFAULT_PLOT_RECT);
+  // The slider a drag grabbed, held until the button comes up.
+  const sliding = useRef<string | null>(null);
+  // A sideways drag over the list sets the selected slider, measured from where the drag began.
+  const listDrag = useRef<{ id: string; startX: number; startValue: number } | null>(null);
   const [activeSlider, setActiveSlider] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -106,7 +116,9 @@ export default function Command(props: { arguments?: { expression?: string } }) 
   const [showHelp, setShowHelp] = useCachedState("show-key-help", true);
   const playheadRef = useRef<number | null>(null);
   playheadRef.current = playhead;
-  const preferences = getPreferenceValues<{ frameRate?: string; strictCalls?: boolean }>();
+  const preferences = getPreferenceValues<{ frameRate?: string; strictCalls?: boolean; hideIntersections?: boolean; slidersOnPlot?: boolean }>();
+  const hideIntersections = preferences.hideIntersections ?? false;
+  const slidersOnPlot = preferences.slidersOnPlot ?? true;
   // The mouse helper only observes, so it needs no permission and runs whenever Grapher is open.
   const mouseMode = true;
   const frameRate = parseFrameRate(preferences.frameRate);
@@ -262,9 +274,29 @@ export default function Command(props: { arguments?: { expression?: string } }) 
     ? [profileEntry.pde!.space, profileEntry.pde!.dependent]
     : (focus?.axes ?? (dimension === 3 ? ["x", "y", "z"] : ["x", "y"]));
 
+  // Sliders: the selected slider line, else the ones the focused line reads, else all.
+  const sliders = analysis.sliders;
+  const selectedSlider = sliders.find((s) => s.id === selectedId);
+  const relevant = selectedSlider ? [selectedSlider] : focus ? sliders.filter((s) => focus.uses.includes(s.name)) : [];
+  const pool = relevant.length ? relevant : sliders;
+  const currentSlider = pool.find((s) => s.name === activeSlider) ?? pool[0] ?? null;
+  // Sliders the focused line reads are drawn on the plot, where the pointer can drag them.
+  const shownSliders = slidersOnPlot ? relevant.slice(0, 4) : [];
+  const sliderGlyphs: SliderGlyph[] = shownSliders.map((slider) => ({
+    id: slider.id,
+    name: slider.name,
+    valueText: formatSliderValue(slider.value, slider.step),
+    value: slider.value,
+    min: slider.min,
+    max: slider.max,
+    active: slider.id === currentSlider?.id,
+    color: focus?.color ?? SERIES_COLORS[0]!,
+  }));
+
   const plot = usePlot({
     contentKey: transform ? `${linesKey}|steps|${progress}` : profileEntry || orbitEntry || fieldEntry ? `${linesKey}|profile|${playhead}` : linesKey,
-    findCrossings: !transform,
+    findCrossings: !transform && !hideIntersections,
+    sliders: sliderGlyphs,
     dimension,
     plots,
     surfaces,
@@ -301,6 +333,53 @@ export default function Command(props: { arguments?: { expression?: string } }) 
 
     const at = plotFraction(event, plotRect);
     const pixels = plotRect.height * event.height;
+
+    // The pointer in display points on the plot image, even once it slides off the edge.
+    const imageX = ((event.x / event.width - plotRect.left) / plotRect.width) * PLOT_DISPLAY.width;
+    const imageY = ((event.y / event.height - plotRect.top) / plotRect.height) * PLOT_DISPLAY.height;
+    const tracks = sliderTracks(shownSliders, PLOT_DISPLAY.height);
+    const valueAlong = (slider: SliderInfo, track: { x0: number; x1: number }): number =>
+      snapSliderValue(slider, slider.min + ((imageX - track.x0) / (track.x1 - track.x0)) * (slider.max - slider.min));
+    const sliderUnder = (): { slider: SliderInfo; value: number } | null => {
+      for (const track of tracks) {
+        if (Math.abs(imageY - track.y) > 10 || imageX < track.x0 - 10 || imageX > track.x1 + 10) continue;
+        const slider = shownSliders.find((s) => s.id === track.id);
+        if (slider) return { slider, value: valueAlong(slider, track) };
+      }
+      return null;
+    };
+    if (event.type === "up") {
+      sliding.current = null;
+      listDrag.current = null;
+      return;
+    }
+    // Raycast doesn't say where its rows are, but pressing a row selects it, so a drag over
+    // the list moves the selected slider: right raises it, a list track's width spans its range.
+    if (event.type === "drag" && (listDrag.current || event.x / event.width < plotRect.left)) {
+      const held = listDrag.current;
+      const slider = sliders.find((s) => s.id === (held ? held.id : selectedId));
+      if (slider) {
+        const grip = held ?? { id: slider.id, startX: event.x, startValue: slider.value };
+        listDrag.current = grip;
+        const moved = (event.x - grip.startX) / LIST_TRACK_POINTS;
+        setSliderTo(slider, snapSliderValue(slider, grip.startValue + moved * (slider.max - slider.min)));
+      }
+      return;
+    }
+    if (event.type === "drag" && sliding.current) {
+      const track = tracks.find((t) => t.id === sliding.current);
+      const slider = shownSliders.find((s) => s.id === sliding.current);
+      if (track && slider) setSliderTo(slider, valueAlong(slider, track));
+      return;
+    }
+    if (event.type === "drag" || event.type === "click") {
+      const hit = sliderUnder();
+      if (hit) {
+        if (event.type === "drag") sliding.current = hit.slider.id;
+        setSliderTo(hit.slider, hit.value);
+        return;
+      }
+    }
     const aspect = PLOT_DISPLAY.width / PLOT_DISPLAY.height;
     const pointIn = (c: Camera2D) =>
       at ? { x: c.cx + (at.u - 0.5) * c.spanY * aspect, y: c.cy + (0.5 - at.v) * c.spanY } : { x: c.cx, y: c.cy };
@@ -355,12 +434,6 @@ export default function Command(props: { arguments?: { expression?: string } }) 
     }
   });
 
-  // Sliders: the selected slider line, else the ones the focused line reads, else all.
-  const sliders = analysis.sliders;
-  const selectedSlider = sliders.find((s) => s.id === selectedId);
-  const relevant = selectedSlider ? [selectedSlider] : focus ? sliders.filter((s) => focus.uses.includes(s.name)) : [];
-  const pool = relevant.length ? relevant : sliders;
-  const currentSlider = pool.find((s) => s.name === activeSlider) ?? pool[0] ?? null;
 
   /** Slider lines for every name the line reads that nothing defines yet. */
   const sliderLinesFor = (entry: EntryAnalysis, stamp: number) =>
@@ -453,6 +526,19 @@ export default function Command(props: { arguments?: { expression?: string } }) 
     if (entry) void showToast({ style: Toast.Style.Success, title: "Deleted", message: entry.source });
   };
 
+  /** Sets a slider by rewriting its line, finding the number afresh so a quick drag stays correct. */
+  const setSliderTo = (slider: SliderInfo, value: number): void => {
+    setActiveSlider(slider.name);
+    if (slider.id === inputId) {
+      setDraft((text) => rewriteSliderValue(text, slider, value));
+      return;
+    }
+    setScene((current) => ({
+      ...current,
+      expressions: current.expressions.map((e) => (e.id === slider.id ? { ...e, source: rewriteSliderValue(e.source, slider, value) } : e)),
+    }));
+  };
+
   const nudgeSlider = (direction: 1 | -1) => (): void => {
     if (!currentSlider) {
       void showToast({ style: Toast.Style.Failure, title: "No sliders yet", message: "Define one like a = 2 [0, 10]" });
@@ -516,6 +602,10 @@ export default function Command(props: { arguments?: { expression?: string } }) 
   const stepIntersection = (direction: 1 | -1) => (): void => {
     if (transform) {
       stepThrough(direction);
+      return;
+    }
+    if (hideIntersections) {
+      void showToast({ style: Toast.Style.Failure, title: "Intersections are hidden", message: "Turn them back on in Grapher's settings" });
       return;
     }
     if (dimension === 3 || points.length === 0) {
@@ -644,11 +734,11 @@ export default function Command(props: { arguments?: { expression?: string } }) 
             key={name}
             title={name}
             icon={{ source: Icon.CircleFilled, tintColor: SERIES_COLORS[i] }}
-            shortcut={{ modifiers: ["cmd"], key: String(i + 1) as "1" }}
+            shortcut={{ modifiers: ["ctrl"], key: String(i + 1) as "1" }}
             onAction={chooseColor(i)}
           />
         ))}
-        <Action title="Automatic Colour" icon={Icon.Wand} shortcut={{ modifiers: ["cmd"], key: "0" }} onAction={chooseColor(null)} />
+        <Action title="Automatic Colour" icon={Icon.Wand} shortcut={{ modifiers: ["ctrl"], key: "0" }} onAction={chooseColor(null)} />
       </ActionPanel.Section>
     </>
   );

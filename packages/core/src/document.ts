@@ -356,10 +356,27 @@ function locateValue(source: string, name: string): [number, number] | null {
   return [match[1]!.length, match[1]!.length + match[2]!.length];
 }
 
-/** Formats a slider value with no more precision than its step implies. */
+/** Formats a slider value with as many decimals as its step has, so 0.25 steps show 3.25, not 3.3. */
 export function formatSliderValue(value: number, step: number): string {
-  const decimals = Math.max(0, Math.min(10, -Math.floor(Math.log10(step) + 1e-9)));
+  let decimals = 0;
+  while (decimals < 10 && Math.abs(Math.round(step * 10 ** decimals) - step * 10 ** decimals) > 1e-9 * 10 ** decimals) decimals++;
   return String(Number(value.toFixed(decimals)));
+}
+
+/** Any value snapped to the slider's step grid and clamped to its bounds. */
+export function snapSliderValue(slider: SliderInfo, value: number): number {
+  const snapped = slider.min + Math.round((value - slider.min) / slider.step) * slider.step;
+  return Math.min(slider.max, Math.max(slider.min, snapped));
+}
+
+/**
+ * Rewrites a slider line's value, finding the number afresh in `source`. A drag
+ * sends several values before the document is analysed again, so the stored
+ * position of the number can be stale by then.
+ */
+export function rewriteSliderValue(source: string, slider: SliderInfo, value: number): string {
+  const span = locateValue(source, slider.name);
+  return span ? source.slice(0, span[0]) + formatSliderValue(value, slider.step) + source.slice(span[1]) : source;
 }
 
 /** The value one step up or down, snapped to the step grid and clamped to the bounds. */
@@ -586,6 +603,9 @@ class Analyzer {
   }
 
   private range(interval: IntervalAst, track: Tracker): Range {
+    if (!interval.lo || !interval.hi) {
+      throw new EntryError("A single value like [0.1] only sets a slider's step; a range is [low, high]");
+    }
     const lo = this.evaluate(this.resolve(interval.lo), track);
     const hi = this.evaluate(this.resolve(interval.hi), track);
     if (!(Number.isFinite(lo) && Number.isFinite(hi) && lo < hi)) {
@@ -1248,9 +1268,11 @@ class Analyzer {
     }
     if (ast.intervals && ast.intervals.length > 1) throw new EntryError("A slider takes one range, like [0, 10]");
     const interval = ast.intervals?.[0];
-    const bounds = interval
-      ? this.range(interval, track)
-      : { lo: Math.min(DEFAULT_SLIDER.lo, value), hi: Math.max(DEFAULT_SLIDER.hi, value) };
+    // [0.1] alone sets the step and keeps the default bounds.
+    const bounds =
+      interval && interval.lo && interval.hi
+        ? this.range(interval, track)
+        : { lo: Math.min(DEFAULT_SLIDER.lo, value), hi: Math.max(DEFAULT_SLIDER.hi, value) };
     const step = interval?.step
       ? this.evaluate(this.resolve(interval.step), track)
       : niceStep((bounds.hi - bounds.lo) / 40);
